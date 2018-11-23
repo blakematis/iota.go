@@ -163,6 +163,10 @@ func (api *API) GetBundlesFromAddresses(addresses Hashes, inclusionState ...bool
 		return nil, err
 	}
 
+	if len(txs) == 0 {
+		return bundle.Bundles{}, nil
+	}
+
 	// misuse as a set
 	bundleHashesSet := map[Hash]struct{}{}
 	for i := range txs {
@@ -343,6 +347,9 @@ func (api *API) FindTransactionObjects(query FindTransactionsQuery) (transaction
 	txHashes, err := api.FindTransactions(query)
 	if err != nil {
 		return nil, err
+	}
+	if len(txHashes) == 0 {
+		return transaction.Transactions{}, nil
 	}
 	return api.GetTransactionObjects(txHashes...)
 }
