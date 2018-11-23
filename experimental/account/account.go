@@ -131,6 +131,7 @@ type Account struct {
 	seed Trytes
 
 	// clockwork
+	// TODO: maybe use one channel and type switch on message type?
 	sendChan            chan sendmsg
 	sendBackChan        chan backmsg
 	receiveChan         chan sendmsg
