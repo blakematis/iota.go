@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/iotaledger/iota.go/experimental/account"
+	"github.com/iotaledger/iota.go/account"
 )
 
 const seed = "BXY9DNFAJKY9UPRTP9AQFQKESGLBDXBQHIXSFDDBLIJDXSKLBYFJ9XPZ9YSAGFVXQHBODMNFLNCMAJHYH"

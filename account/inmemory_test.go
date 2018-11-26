@@ -1,7 +1,7 @@
 package account_test
 
 import (
-	"github.com/iotaledger/iota.go/experimental/account"
+	"github.com/iotaledger/iota.go/account"
 	"github.com/iotaledger/iota.go/transaction"
 	"github.com/iotaledger/iota.go/trinary"
 	. "github.com/onsi/ginkgo"
