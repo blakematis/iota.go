@@ -28,19 +28,38 @@ func (rc *realclock) Now() time.Time {
 type AccountEvent byte
 
 const (
-	// fired when a transfer was broadcasted
+	// emitted when a transfer was broadcasted
 	EventSendingTransfer AccountEvent = iota
-	// fired when a broadcasted transfer got confirmed
+	// emitted when a broadcasted transfer got confirmed
 	EventTransferConfirmed
-	// fired when a deposit is being received
+	// emitted when a deposit is being received
 	EventReceivingDeposit
-	// fired when a deposit is confirmed
+	// emitted when a deposit is confirmed
 	EventReceivedDeposit
-	// fired when a zero value transaction is received
+	// emitted when a zero value transaction is received
 	EventReceivedMessage
+	// emitted for errors of all kinds
+	EventError
+)
+
+type ErrorEvent struct {
+	Type  ErrorType
+	Error error
+}
+
+type ErrorType byte
+
+const (
+	ErrorEventOutgoingTransfers ErrorType = iota
+	ErrorEventIncomingTransfers
 )
 
 type BundleEventChannel chan bundle.Bundle
+
+type depositgen struct {
+	Addr  Hash
+	Error error
+}
 
 type action byte
 
@@ -51,6 +70,7 @@ const (
 	action_current_balance
 	action_is_new
 	action_trigger_transfer_polling
+	action_shutdown
 )
 
 type actionrequest struct {
@@ -128,12 +148,14 @@ func defaultAccountOpts(opts ...*AccountsOpts) *AccountsOpts {
 func NewAccount(seed Trytes, storage Store, api *api.API, opts ...*AccountsOpts) (*Account, error) {
 	opt := defaultAccountOpts(opts...)
 	acc := &Account{
-		id:           fmt.Sprintf("%x", md5.Sum([]byte(seed))),
-		seed:         seed,
-		request:      make(chan actionrequest),
-		sendBackChan: make(chan actionresponse),
-		api:          api,
-		storage:      storage,
+		id:              fmt.Sprintf("%x", md5.Sum([]byte(seed))),
+		seed:            seed,
+		request:         make(chan actionrequest),
+		sendBackChan:    make(chan actionresponse),
+		nextDepositAddr: make(chan depositgen),
+		exitDepositAddr: make(chan struct{}),
+		api:             api,
+		storage:         storage,
 		listeners: map[AccountEvent][]BundleEventChannel{
 			EventSendingTransfer:   {},
 			EventTransferConfirmed: {},
@@ -155,12 +177,16 @@ func NewAccount(seed Trytes, storage Store, api *api.API, opts ...*AccountsOpts)
 }
 
 type Account struct {
+	errors chan ErrorEvent
+
 	id   string
 	seed Trytes
 
 	// internal event loop
-	request      chan actionrequest
-	sendBackChan chan actionresponse
+	request         chan actionrequest
+	sendBackChan    chan actionresponse
+	nextDepositAddr chan depositgen
+	exitDepositAddr chan struct{}
 
 	// misc
 	api     *api.API
@@ -180,6 +206,7 @@ type Account struct {
 	listeners          map[AccountEvent][]BundleEventChannel
 }
 
+// Send sends the specified amount to the recipient address.
 func (a *Account) Send(recipient Recipient) (bundle.Bundle, error) {
 	if !guards.IsTrytesOfExactLength(recipient.Address, consts.HashTrytesSize+consts.AddressChecksumTrytesSize) {
 		return nil, consts.ErrInvalidAddress
@@ -192,6 +219,7 @@ func (a *Account) Send(recipient Recipient) (bundle.Bundle, error) {
 	return payload.item.(bundle.Bundle), nil
 }
 
+// Send sends the specified amounts to the recipient addresses.
 func (a *Account) SendMulti(recipients Recipients) (bundle.Bundle, error) {
 	if recipients == nil || len(recipients) == 0 {
 		return nil, ErrEmptyMultiSendSlice
@@ -210,6 +238,7 @@ func (a *Account) SendMulti(recipients Recipients) (bundle.Bundle, error) {
 	return payload.item.(bundle.Bundle), nil
 }
 
+// NewDepositAddress generates a new deposit address.
 func (a *Account) NewDepositAddress() (Hash, error) {
 	a.request <- actionrequest{Action: action_new_deposit_address}
 	payload := <-a.sendBackChan
@@ -219,6 +248,7 @@ func (a *Account) NewDepositAddress() (Hash, error) {
 	return payload.item.(Hash), nil
 }
 
+// Balance gets the current balance.
 func (a *Account) Balance() (uint64, error) {
 	a.request <- actionrequest{Action: action_current_balance}
 	payload := <-a.sendBackChan
@@ -228,6 +258,7 @@ func (a *Account) Balance() (uint64, error) {
 	return payload.item.(uint64), nil
 }
 
+// IsNew checks whether the account is new.
 func (a *Account) IsNew() (bool, error) {
 	a.request <- actionrequest{Action: action_is_new}
 	payload := <-a.sendBackChan
@@ -237,10 +268,23 @@ func (a *Account) IsNew() (bool, error) {
 	return payload.item.(bool), nil
 }
 
+// Shutdown cleanly shutdowns the account and releases its goroutines.
+func (a *Account) Shutdown() error {
+	a.request <- actionrequest{Action: action_shutdown}
+	return (<-a.sendBackChan).err
+}
+
+// Errors returns a channel from which errors can be received from internal processes (in-/out going transfer polling, promotion/reattachment etc.).
+func (a *Account) Errors() <-chan ErrorEvent {
+	return a.errors
+}
+
+// TriggerTransferPolling triggets a transfer polling.
 func (a *Account) TriggerTransferPolling() {
 	a.request <- actionrequest{Action: action_trigger_transfer_polling}
 }
 
+// RegisterEventHandler registers a new event handler.
 func (a *Account) RegisterEventHandler(event AccountEvent, channel BundleEventChannel) int {
 	eventListeners, ok := a.listeners[event]
 	if ! ok {
@@ -260,9 +304,13 @@ func (a *Account) runEventLoop() error {
 	if err != nil {
 		return err
 	}
-	// warm up the receive event filter by polling once before starting the clockwork
+
+	// warm up the receive event filter by polling once before starting the event loop
 	a.checkIncomingTransfers()
 	a.eventsEnabled = true
+
+	// start deposit address generator
+	go a.depositAddressGenerator()
 
 	// TODO: when there are pending transfers in the database but not a single tail transaction
 	// it means that the sending the transfer or storing the origin bundle tail hash failed.
@@ -278,28 +326,22 @@ func (a *Account) runEventLoop() error {
 				case action_multi_send:
 					a.send(req.Request.(Recipients))
 				case action_new_deposit_address:
-					addr, err := a.newDepositAddress()
-					if err != nil {
-						a.sendError(err)
-						continue
-					}
-					a.sendBackChan <- actionresponse{item: addr}
+					payload := <-a.nextDepositAddr
+					a.sendBackChan <- actionresponse{item: payload.Addr, err: payload.Error}
 				case action_current_balance:
 					balance, err := a.balance()
-					if err != nil {
-						a.sendError(err)
-						continue
-					}
-					a.sendBackChan <- actionresponse{item: balance}
+					a.sendBackChan <- actionresponse{item: balance, err: err}
 				case action_trigger_transfer_polling:
 					a.pollTransfers()
 				case action_is_new:
 					state, err := a.storage.LoadAccount(a.id)
-					if err != nil {
-						a.sendError(err)
-						continue
-					}
-					a.sendBackChan <- actionresponse{item: state.IsNew()}
+					a.sendBackChan <- actionresponse{item: state.IsNew(), err: err}
+				case action_shutdown:
+					// release deposit address generator
+					close(a.exitDepositAddr)
+					a.sendBackChan <- actionresponse{}
+					// exit event loop
+					return
 				}
 			case <-time.After(time.Duration(a.transferPollInterval) * time.Second):
 				a.pollTransfers()
@@ -309,7 +351,32 @@ func (a *Account) runEventLoop() error {
 	return nil
 }
 
-func (a *Account) fireEvent(payload interface{}, event AccountEvent) {
+func (a *Account) depositAddressGenerator() {
+	for {
+		state, err := a.storage.LoadAccount(a.id)
+		if err != nil {
+			a.nextDepositAddr <- depositgen{Error: err}
+			continue
+		}
+		nextIndex := state.lastKeyIndex + 1
+		depositAddr, err := address.GenerateAddress(a.seed, nextIndex, a.secLvl, true)
+		if err != nil {
+			a.nextDepositAddr <- depositgen{Error: err}
+			continue
+		}
+		if err := a.storage.MarkDepositAddresses(a.id, nextIndex); err != nil {
+			a.nextDepositAddr <- depositgen{Error: err}
+			continue
+		}
+		select {
+		case a.nextDepositAddr <- depositgen{Addr: depositAddr}:
+		case <-a.exitDepositAddr:
+			return
+		}
+	}
+}
+
+func (a *Account) emitEvent(payload interface{}, event AccountEvent) {
 	// used during startup to flush events
 	if !a.eventsEnabled {
 		return
@@ -333,6 +400,11 @@ func (a *Account) fireEvent(payload interface{}, event AccountEvent) {
 			default:
 			}
 		}
+	case EventError:
+		select {
+		case a.errors <- payload.(ErrorEvent):
+		default:
+		}
 	}
 }
 
@@ -352,12 +424,12 @@ func (a *Account) send(targets Recipients) {
 		// generate a remainder address for the transfer
 		// by adding it to the store
 		if sum > transferSum {
-			addr, err := a.newDepositAddress()
-			if err != nil {
-				a.sendError(err)
+			payload := <-a.nextDepositAddr
+			if payload.Error != nil {
+				a.sendError(payload.Error)
 				return
 			}
-			remainderAddress = &addr
+			remainderAddress = &payload.Addr
 		}
 
 		// TODO: maybe check for target address spent state?
@@ -401,7 +473,7 @@ func (a *Account) send(targets Recipients) {
 		return
 	}
 
-	a.fireEvent(bndl, EventSendingTransfer)
+	a.emitEvent(bndl, EventSendingTransfer)
 	a.sendBackChan <- actionresponse{item: bndl}
 }
 
@@ -490,22 +562,6 @@ func (a *Account) balance() (uint64, error) {
 	return total, nil
 }
 
-func (a *Account) newDepositAddress() (Hash, error) {
-	state, err := a.storage.LoadAccount(a.id)
-	if err != nil {
-		return "", err
-	}
-	nextIndex := state.lastKeyIndex + 1
-	depositAddr, err := address.GenerateAddress(a.seed, nextIndex, a.secLvl, true)
-	if err != nil {
-		return "", err
-	}
-	if err := a.storage.MarkDepositAddresses(a.id, nextIndex); err != nil {
-		return "", err
-	}
-	return depositAddr, nil
-}
-
 func (a *Account) hasIncomingTransfer(index uint64) (bool, error) {
 	addr, err := address.GenerateAddress(a.seed, index, a.secLvl, true)
 	if err != nil {
@@ -554,7 +610,7 @@ func (a *Account) checkOutgoingTransfers() {
 		}
 		states, err := a.api.GetLatestInclusion(pendingTransfer.Tails)
 		if err != nil {
-			// TODO: maybe fire error event?
+			a.emitEvent(ErrorEvent{Error: err, Type: ErrorEventOutgoingTransfers}, EventError)
 			return
 		}
 		// if any state is true we can remove the transfer as it got confirmed
@@ -562,12 +618,12 @@ func (a *Account) checkOutgoingTransfers() {
 			if state {
 				bndl, err := a.api.GetBundle(pendingTransfer.Tails[i])
 				if err != nil {
-					// TODO: maybe fire error event?
+					a.emitEvent(ErrorEvent{Error: err, Type: ErrorEventOutgoingTransfers}, EventError)
 					return
 				}
-				a.fireEvent(bndl, EventTransferConfirmed)
+				a.emitEvent(bndl, EventTransferConfirmed)
 				if err := a.storage.RemovePendingTransfer(a.id, bndl[0].Bundle); err != nil {
-					// TODO: maybe fire error event?
+					a.emitEvent(ErrorEvent{Error: err, Type: ErrorEventOutgoingTransfers}, EventError)
 					return
 				}
 				break
@@ -605,13 +661,13 @@ func (a *Account) checkIncomingTransfers() {
 	// get all bundles which operated on the current deposit depsAddrs
 	bndls, err := a.api.GetBundlesFromAddresses(depsAddrs, true)
 	if err != nil {
-		// TODO: maybe fire error event?
+		a.emitEvent(ErrorEvent{Error: err, Type: ErrorEventIncomingTransfers}, EventError)
 		return
 	}
 
-	// create the events to fire in the event system
+	// create the events to emit in the event system
 	for _, event := range a.receiveEventFilter.Filter(bndls, depsAddrs, spentAddrs) {
-		a.fireEvent(event.Bundle, event.Event)
+		a.emitEvent(event.Bundle, event.Event)
 	}
 }
 
@@ -694,8 +750,8 @@ func (ptf *PerTailFilter) Filter(bndls bundle.Bundles, depAddrs Hashes, spentAdd
 		return isValue
 	}
 
-	// filter out bundles for which a previous event was fired
-	// and fire new events for the new bundles
+	// filter out bundles for which a previous event was emitted
+	// and emit new events for the new bundles
 	for tailTx, bndl := range receivingBundles {
 		if _, has := ptf.receivingFilter[tailTx]; has {
 			delete(receivingBundles, tailTx)
