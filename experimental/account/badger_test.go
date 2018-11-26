@@ -51,27 +51,17 @@ var _ = Describe("BadgerDB", func() {
 	})
 
 	Context("addresses", func() {
-		It("marks addresses", func() {
-			By("deposit", func() {
-				err := store.MarkDepositAddresses(id, 1)
-				Expect(err).ToNot(HaveOccurred())
-				state, err = store.LoadAccount(id)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(state.UsedAddresses).To(Equal([]int64{-1}))
-			})
-
-			By("spent", func() {
-				err := store.MarkSpentAddresses(id, 1)
-				Expect(err).ToNot(HaveOccurred())
-				state, err = store.LoadAccount(id)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(state.UsedAddresses).To(Equal([]int64{1}))
-			})
+		It("marks deposit addresses", func() {
+			err := store.MarkDepositAddresses(id, 1)
+			Expect(err).ToNot(HaveOccurred())
+			state, err = store.LoadAccount(id)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(state.UsedAddresses).To(Equal([]int64{-1}))
 		})
 	})
 
 	Context("AddPendingTransfer()", func() {
-		It("adds the pending transfer to the store", func() {
+		It("adds the pending zero value transfer to the store", func() {
 			err := store.AddPendingTransfer(id, zeroValBundleTrytes)
 			Expect(err).ToNot(HaveOccurred())
 		})
@@ -104,7 +94,7 @@ var _ = Describe("BadgerDB", func() {
 	})
 
 	Context("RemovePendingTransfer()", func() {
-		It("returns the given transfer", func() {
+		It("removes the given transfer", func() {
 			err := store.RemovePendingTransfer(id, zeroValBundleHash)
 			Expect(err).ToNot(HaveOccurred())
 			bndls, err := store.GetPendingTransfers(id)

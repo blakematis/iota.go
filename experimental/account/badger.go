@@ -113,9 +113,19 @@ func (b *BadgerStore) RemoveAccount(id string) error {
 	})
 }
 
-func (b *BadgerStore) MarkSpentAddresses(id string, indices ...uint64) error {
+func (b *BadgerStore) MarkDepositAddresses(id string, indices ...uint64) error {
 	return b.mutate(id, func(state *AccountState) error {
-		// find the deposit addresses corresponding to the given index
+		for _, index := range indices {
+			state.UsedAddresses = append(state.UsedAddresses, -int64(index))
+		}
+		return nil
+	})
+}
+
+func (b *BadgerStore) AddPendingTransfer(id string, bundleTrytes []Trytes, indices ...uint64) error {
+	// essence: value, timestamp, current index, last index, obsolete tag
+	return b.mutate(id, func(state *AccountState) error {
+		// mark spent addresses
 		for _, index := range indices {
 			found := false
 			for i, usedIndex := range state.UsedAddresses {
@@ -130,22 +140,6 @@ func (b *BadgerStore) MarkSpentAddresses(id string, indices ...uint64) error {
 				return ErrAddrIndexNotFound
 			}
 		}
-		return nil
-	})
-}
-
-func (b *BadgerStore) MarkDepositAddresses(id string, indices ...uint64) error {
-	return b.mutate(id, func(state *AccountState) error {
-		for _, index := range indices {
-			state.UsedAddresses = append(state.UsedAddresses, -int64(index))
-		}
-		return nil
-	})
-}
-
-func (b *BadgerStore) AddPendingTransfer(id string, bundleTrytes []Trytes) error {
-	// essence: value, timestamp, current index, last index, obsolete tag
-	return b.mutate(id, func(state *AccountState) error {
 		pendingTransfer := trytesToPendingTransfer(bundleTrytes)
 		state.PendingTransfers = append(state.PendingTransfers, pendingTransfer)
 		return nil

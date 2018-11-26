@@ -95,21 +95,6 @@ var _ = Describe("Account", func() {
 				}
 			})
 		})
-
-		Context("LastDepositAddress()", func() {
-			It("should return the first address if no deposit address was generated yet", func() {
-				depositAddr, err := acc.LastDepositAddress()
-				Expect(err).ToNot(HaveOccurred())
-				Expect(depositAddr).To(Equal(addrs[0]))
-			})
-			It("should return the correct address", func() {
-				_, err := acc.NewDepositAddress()
-				Expect(err).ToNot(HaveOccurred())
-				depositAddr, err := acc.LastDepositAddress()
-				Expect(err).ToNot(HaveOccurred())
-				Expect(depositAddr).To(Equal(addrs[0]))
-			})
-		})
 	})
 
 	Context("Operations", func() {
@@ -258,7 +243,7 @@ var _ = Describe("Account", func() {
 				}()
 
 				By("giving a valid target address and transfer amount")
-				bndl, err := acc.Send(targetAddr, 100)
+				bndl, err := acc.Send(account.Recipient{Address: targetAddr, Value: 100})
 				Expect(err).ToNot(HaveOccurred())
 				Expect(bndl).To(Equal(finalTxs))
 

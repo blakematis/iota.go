@@ -50,13 +50,27 @@ func (mem *InMemoryStore) RemoveAccount(id string) error {
 	return nil
 }
 
-func (mem *InMemoryStore) MarkSpentAddresses(id string, indices ...uint64) error {
+func (mem *InMemoryStore) MarkDepositAddresses(id string, indices ...uint64) error {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
 	if !ok {
 		return ErrAccountNotFound
 	}
+	for _, index := range indices {
+		state.UsedAddresses = append(state.UsedAddresses, -int64(index))
+	}
+	return nil
+}
+
+func (mem *InMemoryStore) AddPendingTransfer(id string, bundleTrytes []trinary.Trytes, indices ...uint64) error {
+	mem.muAccs.Lock()
+	defer mem.muAccs.Unlock()
+	state, ok := mem.accs[id]
+	if !ok {
+		return ErrAccountNotFound
+	}
+
 	prevState := make([]int64, len(state.UsedAddresses))
 	copy(prevState, state.UsedAddresses)
 	for _, index := range indices {
@@ -74,29 +88,7 @@ func (mem *InMemoryStore) MarkSpentAddresses(id string, indices ...uint64) error
 			return ErrAddrIndexNotFound
 		}
 	}
-	return nil
-}
 
-func (mem *InMemoryStore) MarkDepositAddresses(id string, indices ...uint64) error {
-	mem.muAccs.Lock()
-	defer mem.muAccs.Unlock()
-	state, ok := mem.accs[id]
-	if !ok {
-		return ErrAccountNotFound
-	}
-	for _, index := range indices {
-		state.UsedAddresses = append(state.UsedAddresses, -int64(index))
-	}
-	return nil
-}
-
-func (mem *InMemoryStore) AddPendingTransfer(id string, bundleTrytes []trinary.Trytes) error {
-	mem.muAccs.Lock()
-	defer mem.muAccs.Unlock()
-	state, ok := mem.accs[id]
-	if !ok {
-		return ErrAccountNotFound
-	}
 	pendingTransfer := trytesToPendingTransfer(bundleTrytes)
 	state.PendingTransfers = append(state.PendingTransfers, pendingTransfer)
 	return nil

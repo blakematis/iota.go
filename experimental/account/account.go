@@ -2,6 +2,7 @@ package account
 
 import (
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"github.com/iotaledger/iota.go/address"
 	"github.com/iotaledger/iota.go/api"
@@ -11,6 +12,8 @@ import (
 	. "github.com/iotaledger/iota.go/trinary"
 	"time"
 )
+
+var ErrEmptyMultiSendSlice = errors.New("multi send slice must be of size > 0")
 
 type Clock interface {
 	Now() time.Time
@@ -37,8 +40,49 @@ const (
 	EventReceivedMessage
 )
 
-type EventChannel chan<- interface{}
 type BundleEventChannel chan bundle.Bundle
+
+type action byte
+
+const (
+	action_send action = iota
+	action_multi_send
+	action_new_deposit_address
+	action_current_balance
+	action_is_new
+	action_trigger_transfer_polling
+)
+
+type actionrequest struct {
+	Action  action
+	Request interface{}
+}
+
+type Recipients []Recipient
+
+func (recps Recipients) Sum() uint64 {
+	var sum uint64
+	for _, target := range recps {
+		sum += target.Value
+	}
+	return sum
+}
+
+func (recps Recipients) AsTransfers() bundle.Transfers {
+	transfers := make(bundle.Transfers, len(recps))
+	for i, recipient := range recps {
+		transfers[i] = recipient
+	}
+	return transfers
+}
+
+// Recipient is a bundle.Transfer but with a nicer name.
+type Recipient = bundle.Transfer
+
+type actionresponse struct {
+	item interface{}
+	err  error
+}
 
 type InputSelectionStrategyFunc func(indices []uint64) []uint64
 
@@ -84,18 +128,12 @@ func defaultAccountOpts(opts ...*AccountsOpts) *AccountsOpts {
 func NewAccount(seed Trytes, storage Store, api *api.API, opts ...*AccountsOpts) (*Account, error) {
 	opt := defaultAccountOpts(opts...)
 	acc := &Account{
-		id:                  fmt.Sprintf("%x", md5.Sum([]byte(seed))),
-		seed:                seed,
-		sendChan:            make(chan sendmsg),
-		sendBackChan:        make(chan backmsg),
-		receiveChan:         make(chan sendmsg),
-		newDepAddrChan:      make(chan struct{}),
-		lastDepAddrChan:     make(chan struct{}),
-		balanceReqChan:      make(chan struct{}),
-		newReqChan:          make(chan struct{}),
-		transferPollingChan: make(chan struct{}),
-		api:                 api,
-		storage:             storage,
+		id:           fmt.Sprintf("%x", md5.Sum([]byte(seed))),
+		seed:         seed,
+		request:      make(chan actionrequest),
+		sendBackChan: make(chan actionresponse),
+		api:          api,
+		storage:      storage,
 		listeners: map[AccountEvent][]BundleEventChannel{
 			EventSendingTransfer:   {},
 			EventTransferConfirmed: {},
@@ -110,36 +148,19 @@ func NewAccount(seed Trytes, storage Store, api *api.API, opts ...*AccountsOpts)
 		clock:                opt.Clock,
 		receiveEventFilter:   opt.ReceiveEventFilter,
 	}
-	if err := acc.run(); err != nil {
+	if err := acc.runEventLoop(); err != nil {
 		return nil, err
 	}
 	return acc, nil
-}
-
-type sendmsg struct {
-	target string
-	amount uint64
-}
-
-type backmsg struct {
-	item interface{}
-	err  error
 }
 
 type Account struct {
 	id   string
 	seed Trytes
 
-	// clockwork
-	// TODO: maybe use one channel and type switch on message type?
-	sendChan            chan sendmsg
-	sendBackChan        chan backmsg
-	receiveChan         chan sendmsg
-	newDepAddrChan      chan struct{}
-	lastDepAddrChan     chan struct{}
-	balanceReqChan      chan struct{}
-	newReqChan          chan struct{}
-	transferPollingChan chan struct{}
+	// internal event loop
+	request      chan actionrequest
+	sendBackChan chan actionresponse
 
 	// misc
 	api     *api.API
@@ -159,11 +180,29 @@ type Account struct {
 	listeners          map[AccountEvent][]BundleEventChannel
 }
 
-func (a *Account) Send(target Hash, amount uint64) (bundle.Bundle, error) {
-	if !guards.IsTrytesOfExactLength(target, consts.HashTrytesSize+consts.AddressChecksumTrytesSize) {
+func (a *Account) Send(recipient Recipient) (bundle.Bundle, error) {
+	if !guards.IsTrytesOfExactLength(recipient.Address, consts.HashTrytesSize+consts.AddressChecksumTrytesSize) {
 		return nil, consts.ErrInvalidAddress
 	}
-	a.sendChan <- sendmsg{target: target, amount: amount}
+	a.request <- actionrequest{Action: action_send, Request: recipient}
+	payload := <-a.sendBackChan
+	if payload.err != nil {
+		return nil, payload.err
+	}
+	return payload.item.(bundle.Bundle), nil
+}
+
+func (a *Account) SendMulti(recipients Recipients) (bundle.Bundle, error) {
+	if recipients == nil || len(recipients) == 0 {
+		return nil, ErrEmptyMultiSendSlice
+	}
+	for _, target := range recipients {
+		if !guards.IsTrytesOfExactLength(target.Address, consts.HashTrytesSize+consts.AddressChecksumTrytesSize) {
+			return nil, consts.ErrInvalidAddress
+		}
+	}
+
+	a.request <- actionrequest{Action: action_multi_send, Request: recipients}
 	payload := <-a.sendBackChan
 	if payload.err != nil {
 		return nil, payload.err
@@ -172,16 +211,7 @@ func (a *Account) Send(target Hash, amount uint64) (bundle.Bundle, error) {
 }
 
 func (a *Account) NewDepositAddress() (Hash, error) {
-	a.newDepAddrChan <- struct{}{}
-	payload := <-a.sendBackChan
-	if payload.err != nil {
-		return "", payload.err
-	}
-	return payload.item.(Hash), nil
-}
-
-func (a *Account) LastDepositAddress() (Hash, error) {
-	a.lastDepAddrChan <- struct{}{}
+	a.request <- actionrequest{Action: action_new_deposit_address}
 	payload := <-a.sendBackChan
 	if payload.err != nil {
 		return "", payload.err
@@ -190,7 +220,7 @@ func (a *Account) LastDepositAddress() (Hash, error) {
 }
 
 func (a *Account) Balance() (uint64, error) {
-	a.balanceReqChan <- struct{}{}
+	a.request <- actionrequest{Action: action_current_balance}
 	payload := <-a.sendBackChan
 	if payload.err != nil {
 		return 0, payload.err
@@ -199,7 +229,7 @@ func (a *Account) Balance() (uint64, error) {
 }
 
 func (a *Account) IsNew() (bool, error) {
-	a.newReqChan <- struct{}{}
+	a.request <- actionrequest{Action: action_is_new}
 	payload := <-a.sendBackChan
 	if payload.err != nil {
 		return false, payload.err
@@ -208,7 +238,7 @@ func (a *Account) IsNew() (bool, error) {
 }
 
 func (a *Account) TriggerTransferPolling() {
-	a.transferPollingChan <- struct{}{}
+	a.request <- actionrequest{Action: action_trigger_transfer_polling}
 }
 
 func (a *Account) RegisterEventHandler(event AccountEvent, channel BundleEventChannel) int {
@@ -222,10 +252,10 @@ func (a *Account) RegisterEventHandler(event AccountEvent, channel BundleEventCh
 }
 
 func (a *Account) sendError(err error) {
-	a.sendBackChan <- backmsg{err: err}
+	a.sendBackChan <- actionresponse{err: err}
 }
 
-func (a *Account) run() error {
+func (a *Account) runEventLoop() error {
 	_, err := a.storage.LoadAccount(a.id)
 	if err != nil {
 		return err
@@ -233,43 +263,44 @@ func (a *Account) run() error {
 	// warm up the receive event filter by polling once before starting the clockwork
 	a.checkIncomingTransfers()
 	a.eventsEnabled = true
+
+	// TODO: when there are pending transfers in the database but not a single tail transaction
+	// it means that the sending the transfer or storing the origin bundle tail hash failed.
+	// thereby before the account event loop starts, the missing tail hash should be added.
+
 	go func() {
 		for {
 			select {
-			case req := <-a.sendChan:
-				a.send(req)
-			case <-a.receiveChan:
-			case <-a.newDepAddrChan:
-				addr, err := a.newDepositAddress()
-				if err != nil {
-					a.sendError(err)
-					continue
+			case req := <-a.request:
+				switch req.Action {
+				case action_send:
+					a.send(Recipients{req.Request.(Recipient)})
+				case action_multi_send:
+					a.send(req.Request.(Recipients))
+				case action_new_deposit_address:
+					addr, err := a.newDepositAddress()
+					if err != nil {
+						a.sendError(err)
+						continue
+					}
+					a.sendBackChan <- actionresponse{item: addr}
+				case action_current_balance:
+					balance, err := a.balance()
+					if err != nil {
+						a.sendError(err)
+						continue
+					}
+					a.sendBackChan <- actionresponse{item: balance}
+				case action_trigger_transfer_polling:
+					a.pollTransfers()
+				case action_is_new:
+					state, err := a.storage.LoadAccount(a.id)
+					if err != nil {
+						a.sendError(err)
+						continue
+					}
+					a.sendBackChan <- actionresponse{item: state.IsNew()}
 				}
-				a.sendBackChan <- backmsg{item: addr}
-			case <-a.lastDepAddrChan:
-				addr, err := a.lastDepositAddress()
-				if err != nil {
-					a.sendError(err)
-					continue
-				}
-				a.sendBackChan <- backmsg{item: addr}
-			case <-a.balanceReqChan:
-				balance, err := a.balance()
-				if err != nil {
-					a.sendError(err)
-					continue
-				}
-				a.sendBackChan <- backmsg{item: balance}
-			case <-a.newReqChan:
-				state, err := a.storage.LoadAccount(a.id)
-				if err != nil {
-					a.sendError(err)
-					continue
-				}
-				a.sendBackChan <- backmsg{item: state.IsNew()}
-			case <-a.transferPollingChan:
-				a.pollTransfers()
-				// no fallthrough possible in selects
 			case <-time.After(time.Duration(a.transferPollInterval) * time.Second):
 				a.pollTransfers()
 			}
@@ -305,20 +336,22 @@ func (a *Account) fireEvent(payload interface{}, event AccountEvent) {
 	}
 }
 
-func (a *Account) send(req sendmsg) {
+func (a *Account) send(targets Recipients) {
 	var inputs []api.Input
 	var remainderAddress *Hash
 	var sum uint64
 	var err error
-	if req.amount > 0 {
-		sum, inputs, err = a.selectInputs(req.amount)
+
+	transferSum := targets.Sum()
+	if transferSum > 0 {
+		sum, inputs, err = a.selectInputs(transferSum)
 		if err != nil {
 			a.sendError(err)
 			return
 		}
 		// generate a remainder address for the transfer
 		// by adding it to the store
-		if sum > req.amount {
+		if sum > transferSum {
 			addr, err := a.newDepositAddress()
 			if err != nil {
 				a.sendError(err)
@@ -330,12 +363,7 @@ func (a *Account) send(req sendmsg) {
 		// TODO: maybe check for target address spent state?
 	}
 
-	transfers := bundle.Transfers{
-		{
-			Value:   req.amount,
-			Address: req.target,
-		},
-	}
+	transfers := targets.AsTransfers()
 
 	ts := uint64(a.clock.Now().UnixNano() / int64(time.Second))
 	opts := api.PrepareTransfersOptions{
@@ -351,24 +379,15 @@ func (a *Account) send(req sendmsg) {
 		return
 	}
 
-	// TODO: pending transfer and address marking must be done atomically
-
-	// add the new transfer to the db
-	if err := a.storage.AddPendingTransfer(a.id, bundleTrytes); err != nil {
-		a.sendError(err)
-		return
+	indices := make([]uint64, len(inputs))
+	for i, input := range inputs {
+		indices[i] = input.KeyIndex
 	}
 
-	// mark the used addresses as spent
-	if inputs != nil {
-		indices := make([]uint64, len(inputs))
-		for i, input := range inputs {
-			indices[i] = input.KeyIndex
-		}
-		if err := a.storage.MarkSpentAddresses(a.id, indices...); err != nil {
-			a.sendError(err)
-			return
-		}
+	// add the new transfer to the db
+	if err := a.storage.AddPendingTransfer(a.id, bundleTrytes, indices...); err != nil {
+		a.sendError(err)
+		return
 	}
 
 	bndl, err := a.api.SendTrytes(bundleTrytes, a.depth, a.mwm)
@@ -383,7 +402,7 @@ func (a *Account) send(req sendmsg) {
 	}
 
 	a.fireEvent(bndl, EventSendingTransfer)
-	a.sendBackChan <- backmsg{item: bndl}
+	a.sendBackChan <- actionresponse{item: bndl}
 }
 
 // selects addresses as inputs which are deposit addresses,
@@ -487,23 +506,6 @@ func (a *Account) newDepositAddress() (Hash, error) {
 	return depositAddr, nil
 }
 
-func (a *Account) lastDepositAddress() (Hash, error) {
-	state, err := a.storage.LoadAccount(a.id)
-	if err != nil {
-		return "", err
-	}
-	depositAddresses := state.DepositAddresses()
-	if len(depositAddresses) == 0 {
-		return a.newDepositAddress()
-	}
-	index := depositAddresses[len(depositAddresses)-1]
-	depositAddr, err := address.GenerateAddress(a.seed, index, a.secLvl, true)
-	if err != nil {
-		return "", err
-	}
-	return depositAddr, nil
-}
-
 func (a *Account) hasIncomingTransfer(index uint64) (bool, error) {
 	addr, err := address.GenerateAddress(a.seed, index, a.secLvl, true)
 	if err != nil {
@@ -516,6 +518,22 @@ func (a *Account) hasIncomingTransfer(index uint64) (bool, error) {
 	}
 
 	for _, bndl := range bundles {
+		// if the bundle is invalid don't consider it at all as an incoming transfer
+		if err := bundle.ValidBundle(bndl); err != nil {
+			continue
+		}
+		// if the bundle is not a value transfer don't consider it either
+		valueTransfer := false
+		for i := range bndl {
+			tx := &bndl[i]
+			if tx.Value < 0 || tx.Value > 0 {
+				valueTransfer = true
+				break
+			}
+		}
+		if !valueTransfer {
+			continue
+		}
 		if !*bndl[0].Persistence {
 			return true, nil
 		}
@@ -548,7 +566,10 @@ func (a *Account) checkOutgoingTransfers() {
 					return
 				}
 				a.fireEvent(bndl, EventTransferConfirmed)
-				a.storage.RemovePendingTransfer(a.id, bndl[0].Bundle)
+				if err := a.storage.RemovePendingTransfer(a.id, bndl[0].Bundle); err != nil {
+					// TODO: maybe fire error event?
+					return
+				}
 				break
 			}
 		}

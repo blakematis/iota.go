@@ -22,8 +22,8 @@ type AccountState struct {
 	lastKeyIndex     uint64
 }
 
-func (as *AccountState) IsNew() bool {
-	return len(as.UsedAddresses) == 0 && len(as.PendingTransfers) == 0
+func (state *AccountState) IsNew() bool {
+	return len(state.UsedAddresses) == 0 && len(state.PendingTransfers) == 0
 }
 
 func (state *AccountState) DepositAddresses() []uint64 {
@@ -60,9 +60,8 @@ var ErrPendingTransferNotFound = errors.New("pending transfer not found")
 type Store interface {
 	LoadAccount(id string) (*AccountState, error)
 	RemoveAccount(id string) error
-	MarkSpentAddresses(id string, indices ...uint64) error
 	MarkDepositAddresses(id string, indices ...uint64) error
-	AddPendingTransfer(id string, bundleTrytes []Trytes) error
+	AddPendingTransfer(id string, bundleTrytes []Trytes, indices ...uint64) error
 	RemovePendingTransfer(id string, bundleHash Hash) error
 	AddTailHash(id string, bundleHash Hash, newTailTxHash Hash) error
 	GetPendingTransfer(id string, bundleHash Hash) (bundle.Bundle, error)

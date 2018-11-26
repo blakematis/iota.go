@@ -403,7 +403,7 @@ func ExampleGetTransfers() {}
 func ExampleIsPromotable() {}
 
 // i req: seed, The seed from which to derive private keys and addresses of.
-// i req: transfers, The Transfers to prepare.
+// i req: transfers, The AsTransfers to prepare.
 // i req: options, Options used for preparing the transfers.
 // o: []Trytes, The prepared Trytes, ready for Proof-of-Work.
 // o: error, Returned for invalid parameters and internal errors.
@@ -456,7 +456,7 @@ func ExamplePrepareTransfers() {
 // i req: seed, The seed from which to derive private keys and addresses of.
 // i req: depth, The depth used in GetTransactionsToApprove().
 // i req: mwm, The minimum weight magnitude to fufill.
-// i req: transfers, The Transfers to prepare and send off.
+// i req: transfers, The AsTransfers to prepare and send off.
 // i req: options, The options used for preparing and sending of the bundle.
 // o: Bundle, The sent of Bundle.
 // o: error, Returned for invalid parameters and internal errors.
