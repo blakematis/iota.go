@@ -231,14 +231,13 @@ var _ = Describe("Account", func() {
 				Expect(balance).To(Equal(uint64(100)))
 
 				By("registering an event listener for sending transfers")
-				sendingTransferEventChannel := make(chan bundle.Bundle)
 				resultBackCheck := make(chan bundle.Bundle)
-				acc.RegisterEventHandler(account.EventSendingTransfer, sendingTransferEventChannel)
+				bundleChan := account.BundleChannel(acc.RegisterEventHandler(account.EventSendingTransfer))
 
 				acc.TriggerTransferPolling()
 
 				go func() {
-					bndl := <-sendingTransferEventChannel
+					bndl := <-bundleChan
 					resultBackCheck <- bndl
 				}()
 
@@ -295,12 +294,11 @@ var _ = Describe("Account", func() {
 				}
 
 				By("registering an event listener for confirmed sent transfers")
-				sentTransferEventChannel := make(chan bundle.Bundle)
-				acc.RegisterEventHandler(account.EventTransferConfirmed, sentTransferEventChannel)
+				bundleChan2 := account.BundleChannel(acc.RegisterEventHandler(account.EventTransferConfirmed))
 
 				acc.TriggerTransferPolling()
 
-				bundleFromEvent = <-sentTransferEventChannel
+				bundleFromEvent = <-bundleChan2
 				Expect(bundleFromEvent[0].Bundle).To(Equal(finalTxs[0].Bundle))
 
 				state, err := store.LoadAccount(id)

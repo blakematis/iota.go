@@ -122,7 +122,7 @@ func (b *BadgerStore) MarkDepositAddresses(id string, indices ...uint64) error {
 	})
 }
 
-func (b *BadgerStore) AddPendingTransfer(id string, bundleTrytes []Trytes, indices ...uint64) error {
+func (b *BadgerStore) AddPendingTransfer(id string, tailTx Hash, bundleTrytes []Trytes, indices ...uint64) error {
 	// essence: value, timestamp, current index, last index, obsolete tag
 	return b.mutate(id, func(state *AccountState) error {
 		// mark spent addresses
@@ -141,67 +141,52 @@ func (b *BadgerStore) AddPendingTransfer(id string, bundleTrytes []Trytes, indic
 			}
 		}
 		pendingTransfer := trytesToPendingTransfer(bundleTrytes)
-		state.PendingTransfers = append(state.PendingTransfers, pendingTransfer)
+		pendingTransfer.Tails = append(pendingTransfer.Tails, tailTx)
+		state.PendingTransfers[tailTx] = &pendingTransfer
 		return nil
 	})
 }
 
-func (b *BadgerStore) RemovePendingTransfer(id string, bundleHash Hash) error {
+func (b *BadgerStore) RemovePendingTransfer(id string, tailTx Hash) error {
 	return b.mutate(id, func(state *AccountState) error {
-		_, index, err := bundleIndexByHash(state, bundleHash)
-		if err != nil {
-			return err
+		if _, ok := state.PendingTransfers[tailTx]; !ok {
+			return ErrPendingTransferNotFound
 		}
-		// not found
-		if index == -1 {
-			return ErrAccountNotFound
-		}
-		state.PendingTransfers = append(state.PendingTransfers[:index], state.PendingTransfers[index+1:]...)
+		delete(state.PendingTransfers, tailTx)
 		return nil
 	})
 }
 
-func (b *BadgerStore) AddTailHash(id string, bundleHash Hash, newTailTxHash Hash) error {
+func (b *BadgerStore) AddTailHash(id string, tailTx Hash, newTailTxHash Hash) error {
 	return b.mutate(id, func(state *AccountState) error {
-		_, i, err := bundleIndexByHash(state, bundleHash)
-		if err != nil {
-			return err
+		pendingTransfer, ok := state.PendingTransfers[tailTx];
+		if !ok {
+			return ErrPendingTransferNotFound
 		}
-		tails := append(state.PendingTransfers[i].Tails, newTailTxHash)
-		state.PendingTransfers[i].Tails = tails
+		pendingTransfer.Tails = append(pendingTransfer.Tails, newTailTxHash)
 		return nil
 	})
 }
 
-func (b *BadgerStore) GetPendingTransfer(id string, bundleHash Hash) (bundle.Bundle, error) {
-	var bndl bundle.Bundle
-	if err := b.read(id, func(state *AccountState) error {
-		b, _, err := bundleIndexByHash(state, bundleHash)
-		if err != nil {
-			return err
-		}
-		bndl = b
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return bndl, nil
-}
-
-func (b *BadgerStore) GetPendingTransfers(id string) (bundle.Bundles, error) {
+func (b *BadgerStore) GetPendingTransfers(id string) (Hashes, bundle.Bundles, error) {
 	var bundles bundle.Bundles
+	var tailTxs Hashes
 	if err := b.read(id, func(state *AccountState) error {
 		bundles = make(bundle.Bundles, len(state.PendingTransfers))
-		for i, pendingTransfer := range state.PendingTransfers {
-			bndl, err := essenceToBundle(&pendingTransfer)
+		tailTxs = make(Hashes, len(state.PendingTransfers))
+		i := 0
+		for tailTx, pendingTransfer := range state.PendingTransfers {
+			bndl, err := essenceToBundle(pendingTransfer)
 			if err != nil {
 				return err
 			}
 			bundles[i] = bndl
+			tailTxs[i] = tailTx
+			i++
 		}
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return bundles, nil
+	return tailTxs, bundles, nil
 }

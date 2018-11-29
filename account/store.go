@@ -12,13 +12,13 @@ import (
 func newaccountstate() *AccountState {
 	return &AccountState{
 		UsedAddresses:    make([]int64, 0),
-		PendingTransfers: make([]pendingtransfer, 0),
+		PendingTransfers: make(map[string]*pendingtransfer, 0),
 	}
 }
 
 type AccountState struct {
-	UsedAddresses    []int64           `json:"used_addresses"`
-	PendingTransfers []pendingtransfer `json:"pending_transfers"`
+	UsedAddresses    []int64                     `json:"used_addresses"`
+	PendingTransfers map[string]*pendingtransfer `json:"pending_transfers"`
 	lastKeyIndex     uint64
 }
 
@@ -61,11 +61,10 @@ type Store interface {
 	LoadAccount(id string) (*AccountState, error)
 	RemoveAccount(id string) error
 	MarkDepositAddresses(id string, indices ...uint64) error
-	AddPendingTransfer(id string, bundleTrytes []Trytes, indices ...uint64) error
-	RemovePendingTransfer(id string, bundleHash Hash) error
-	AddTailHash(id string, bundleHash Hash, newTailTxHash Hash) error
-	GetPendingTransfer(id string, bundleHash Hash) (bundle.Bundle, error)
-	GetPendingTransfers(id string) (bundle.Bundles, error)
+	AddPendingTransfer(id string, tailTx Hash, bundleTrytes []Trytes, indices ...uint64) error
+	RemovePendingTransfer(id string, tailHash Hash) error
+	AddTailHash(id string, tailHash Hash, newTailTxHash Hash) error
+	GetPendingTransfers(id string) (Hashes, bundle.Bundles, error)
 }
 
 func trytesToPendingTransfer(trytes []Trytes) pendingtransfer {
@@ -80,7 +79,7 @@ func trytesToPendingTransfer(trytes []Trytes) pendingtransfer {
 func essenceToBundle(pt *pendingtransfer) (bundle.Bundle, error) {
 	bndl := make(bundle.Bundle, len(pt.Bundle))
 	in := 0
-	for i := len(pt.Bundle) - 1; i >= 0; i-- {
+	for i := 0; i < len(bndl); i++ {
 		essenceTrits := pt.Bundle[i]
 		// add empty trits for fields after the last index
 		emptyTxSuffix := PadTrits(Trits{}, consts.TransactionTrinarySize-consts.BundleTrinaryOffset)
@@ -99,25 +98,4 @@ func essenceToBundle(pt *pendingtransfer) (bundle.Bundle, error) {
 		panic(err)
 	}
 	return b, nil
-}
-
-func bundleIndexByHash(state *AccountState, bundleHash Hash) (bundle.Bundle, int, error) {
-	index := -1
-	var b bundle.Bundle
-	for i, pendingTransfer := range state.PendingTransfers {
-		finBndl, err := essenceToBundle(&pendingTransfer)
-		if err != nil {
-			return nil, 0, err
-		}
-		if finBndl[0].Bundle != bundleHash {
-			continue
-		}
-		b = finBndl
-		index = i
-		break
-	}
-	if index == -1 {
-		return nil, -1, ErrPendingTransferNotFound
-	}
-	return b, index, nil
 }

@@ -63,7 +63,7 @@ func (mem *InMemoryStore) MarkDepositAddresses(id string, indices ...uint64) err
 	return nil
 }
 
-func (mem *InMemoryStore) AddPendingTransfer(id string, bundleTrytes []trinary.Trytes, indices ...uint64) error {
+func (mem *InMemoryStore) AddPendingTransfer(id string, tailTx trinary.Hash, bundleTrytes []trinary.Trytes, indices ...uint64) error {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
@@ -71,6 +71,7 @@ func (mem *InMemoryStore) AddPendingTransfer(id string, bundleTrytes []trinary.T
 		return ErrAccountNotFound
 	}
 
+	// mark spent addresses
 	prevState := make([]int64, len(state.UsedAddresses))
 	copy(prevState, state.UsedAddresses)
 	for _, index := range indices {
@@ -90,69 +91,59 @@ func (mem *InMemoryStore) AddPendingTransfer(id string, bundleTrytes []trinary.T
 	}
 
 	pendingTransfer := trytesToPendingTransfer(bundleTrytes)
-	state.PendingTransfers = append(state.PendingTransfers, pendingTransfer)
+	pendingTransfer.Tails = append(pendingTransfer.Tails, tailTx)
+	state.PendingTransfers[tailTx] = &pendingTransfer
 	return nil
 }
 
-func (mem *InMemoryStore) RemovePendingTransfer(id string, bundleHash trinary.Hash) error {
+func (mem *InMemoryStore) RemovePendingTransfer(id string, tailTx trinary.Hash) error {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
 	if !ok {
 		return ErrAccountNotFound
 	}
-	_, index, err := bundleIndexByHash(state, bundleHash)
-	if err != nil {
-		return err
+	if _, ok := state.PendingTransfers[tailTx]; !ok {
+		return ErrPendingTransferNotFound
 	}
-	state.PendingTransfers = append(state.PendingTransfers[:index], state.PendingTransfers[index+1:]...)
+	delete(state.PendingTransfers, tailTx)
 	return nil
 }
 
-func (mem *InMemoryStore) AddTailHash(id string, bundleHash trinary.Hash, newTailTxHash trinary.Hash) error {
+func (mem *InMemoryStore) AddTailHash(id string, tailTx trinary.Hash, newTailTxHash trinary.Hash) error {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
 	if !ok {
 		return ErrAccountNotFound
 	}
-	_, index, err := bundleIndexByHash(state, bundleHash)
-	if err != nil {
-		return err
+
+	pendingTransfer, ok := state.PendingTransfers[tailTx];
+	if !ok {
+		return ErrPendingTransferNotFound
 	}
-	tails := append(state.PendingTransfers[index].Tails, newTailTxHash)
-	state.PendingTransfers[index].Tails = tails
+	pendingTransfer.Tails = append(pendingTransfer.Tails, newTailTxHash)
 	return nil
 }
 
-func (mem *InMemoryStore) GetPendingTransfer(id string, bundleHash trinary.Hash) (bundle.Bundle, error) {
+func (mem *InMemoryStore) GetPendingTransfers(id string) (trinary.Hashes, bundle.Bundles, error) {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
 	if !ok {
-		return nil, ErrAccountNotFound
-	}
-	b, _, err := bundleIndexByHash(state, bundleHash)
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-func (mem *InMemoryStore) GetPendingTransfers(id string) (bundle.Bundles, error) {
-	mem.muAccs.Lock()
-	defer mem.muAccs.Unlock()
-	state, ok := mem.accs[id]
-	if !ok {
-		return nil, ErrAccountNotFound
+		return nil, nil, ErrAccountNotFound
 	}
 	bundles := make(bundle.Bundles, len(state.PendingTransfers))
-	for i, pendingTransfer := range state.PendingTransfers {
-		bndl, err := essenceToBundle(&pendingTransfer)
+	tailTxs := make(trinary.Hashes, len(state.PendingTransfers))
+	i := 0
+	for tailTx, pendingTransfer := range state.PendingTransfers {
+		bndl, err := essenceToBundle(pendingTransfer)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		bundles[i] = bndl
+		tailTxs[i] = tailTx
+		i++
 	}
-	return bundles, nil
+	return tailTxs, bundles, nil
 }

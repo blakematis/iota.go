@@ -20,7 +20,6 @@ var _ = Describe("InMemory", func() {
 	if err != nil {
 		panic(err)
 	}
-	zeroValBundleHash := "FPBVYDWIHZHJLBRQVZBTWEXIOBGTDYIUPQPBI9HIVVWGIDADHGFQOO9OPWYJVXJBIDHIHIPOCKHUQUCF9"
 
 	store := account.NewInMemoryStore()
 
@@ -44,22 +43,14 @@ var _ = Describe("InMemory", func() {
 
 	Context("AddPendingTransfer()", func() {
 		It("adds the pending zero value transfer to the store", func() {
-			err := store.AddPendingTransfer(id, zeroValBundleTrytes)
+			err := store.AddPendingTransfer(id, tx.Hash, zeroValBundleTrytes)
 			Expect(err).ToNot(HaveOccurred())
-		})
-	})
-
-	Context("GetPendingTransfer()", func() {
-		It("returns the pending transfer given the bundle hash", func() {
-			bndl, err := store.GetPendingTransfer(id, zeroValBundleHash)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(bndl[0].Address).To(Equal(tx.Address))
 		})
 	})
 
 	Context("GetPendingTransfers()", func() {
 		It("returns all pending transfers", func() {
-			bndls, err := store.GetPendingTransfers(id)
+			_, bndls, err := store.GetPendingTransfers(id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(bndls[0][0].Address).To(Equal(tx.Address))
 		})
@@ -67,22 +58,23 @@ var _ = Describe("InMemory", func() {
 
 	Context("AddTailHash()", func() {
 		It("adds the given tail hash", func() {
-			err := store.AddTailHash(id, zeroValBundleHash, tx.Hash)
+			newTail := strings.Repeat("A", 81)
+			err := store.AddTailHash(id, tx.Hash, newTail)
 			Expect(err).ToNot(HaveOccurred())
 			state, err = store.LoadAccount(id)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(state.PendingTransfers[0].Tails[0]).To(Equal(tx.Hash))
+			Expect(state.PendingTransfers[tx.Hash].Tails[1]).To(Equal(newTail))
 		})
 	})
 
 	Context("RemovePendingTransfer()", func() {
 		It("removes the given transfer", func() {
-			err := store.RemovePendingTransfer(id, zeroValBundleHash)
+			err := store.RemovePendingTransfer(id, tx.Hash)
 			Expect(err).ToNot(HaveOccurred())
 			state, err = store.LoadAccount(id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(len(state.PendingTransfers)).To(Equal(0))
-			bndls, err := store.GetPendingTransfers(id)
+			_, bndls, err := store.GetPendingTransfers(id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(len(bndls)).To(Equal(0))
 		})

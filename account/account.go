@@ -2,18 +2,36 @@ package account
 
 import (
 	"crypto/md5"
-	"errors"
 	"fmt"
 	"github.com/iotaledger/iota.go/address"
 	"github.com/iotaledger/iota.go/api"
 	"github.com/iotaledger/iota.go/bundle"
 	"github.com/iotaledger/iota.go/consts"
 	"github.com/iotaledger/iota.go/guards"
+	"github.com/iotaledger/iota.go/transaction"
 	. "github.com/iotaledger/iota.go/trinary"
+	"github.com/pkg/errors"
+	"strings"
 	"time"
 )
 
 var ErrEmptyMultiSendSlice = errors.New("multi send slice must be of size > 0")
+
+type ErrMarkDepositAddr struct {
+	actualError error
+}
+
+func (err ErrMarkDepositAddr) Error() string {
+	return err.Error()
+}
+
+type ErrAccountPanic struct {
+	internalError error
+}
+
+func (err ErrAccountPanic) Error() string {
+	return fmt.Sprintf("severe account error (panic): %s", err.internalError.Error())
+}
 
 type Clock interface {
 	Now() time.Time
@@ -38,9 +56,20 @@ const (
 	EventReceivedDeposit
 	// emitted when a zero value transaction is received
 	EventReceivedMessage
+	// emitted when a promotion occurred
+	EventPromotion
+	// emitted when a reattachment occurred
+	EventReattachment
 	// emitted for errors of all kinds
 	EventError
 )
+
+type PromotionReattachmentEvent struct {
+	OriginTailTxHash       Hash
+	BundleHash             Hash
+	PromotionTailTxHash    Hash
+	ReattachmentTailTxHash Hash
+}
 
 type ErrorEvent struct {
 	Type  ErrorType
@@ -52,9 +81,49 @@ type ErrorType byte
 const (
 	ErrorEventOutgoingTransfers ErrorType = iota
 	ErrorEventIncomingTransfers
+	ErrorPromoteTransfer
+	ErrorReattachTransfer
 )
 
-type BundleEventChannel chan bundle.Bundle
+type EventChannel interface {
+	Channel() chan interface{}
+}
+
+type eventchannel struct {
+	channel chan interface{}
+}
+
+func (ec eventchannel) Channel() chan interface{} {
+	return ec.channel
+}
+
+func BundleChannel(channel EventChannel) <-chan bundle.Bundle {
+	ch := make(chan bundle.Bundle)
+	go func() {
+		for {
+			bndl, ok := <-channel.Channel()
+			if !ok {
+				return
+			}
+			ch <- bndl.(bundle.Bundle)
+		}
+	}()
+	return ch
+}
+
+func PromotionReattachmentChannel(channel EventChannel) <-chan PromotionReattachmentEvent {
+	ch := make(chan PromotionReattachmentEvent)
+	go func() {
+		for {
+			bndl, ok := <-channel.Channel()
+			if !ok {
+				return
+			}
+			ch <- bndl.(PromotionReattachmentEvent)
+		}
+	}()
+	return ch
+}
 
 type depositgen struct {
 	Addr  Hash
@@ -104,23 +173,31 @@ type actionresponse struct {
 	err  error
 }
 
-type InputSelectionStrategyFunc func(indices []uint64) []uint64
+type InputSelectionStrategyFunc func(a *Account, transferValue uint64) (uint64, []api.Input, error)
+
+type addrindextuple struct {
+	addr  Hash
+	index uint64
+}
 
 type AccountsOpts struct {
-	MWM                  uint64
-	Depth                uint64
-	TransferPollInterval uint64
-	SecurityLevel        consts.SecurityLevel
-	Clock                Clock
-	ReceiveEventFilter   ReceiveEventFilter
+	MWM                     uint64
+	Depth                   uint64
+	TransferPollInterval    uint64
+	PromoteReattachInterval uint64
+	SecurityLevel           consts.SecurityLevel
+	Clock                   Clock
+	ReceiveEventFilter      ReceiveEventFilter
+	InputSelectionStrategy  InputSelectionStrategyFunc
 }
 
 func defaultAccountOpts(opts ...*AccountsOpts) *AccountsOpts {
 	if len(opts) == 0 {
 		return &AccountsOpts{
 			MWM: 14, Depth: 3, SecurityLevel: consts.SecurityLevelMedium,
-			TransferPollInterval: 30, Clock: &realclock{},
-			ReceiveEventFilter: NewPerTailReceiveEventFilter(),
+			TransferPollInterval: 10, PromoteReattachInterval: 10, Clock: &realclock{},
+			ReceiveEventFilter:     NewPerTailReceiveEventFilter(),
+			InputSelectionStrategy: LeftToRightInputSelection,
 		}
 	}
 	defaultValue := func(val uint64, should uint64) uint64 {
@@ -135,12 +212,16 @@ func defaultAccountOpts(opts ...*AccountsOpts) *AccountsOpts {
 	}
 	opt.Depth = defaultValue(opt.Depth, 3)
 	opt.MWM = defaultValue(opt.MWM, 14)
-	opt.TransferPollInterval = defaultValue(opt.TransferPollInterval, 10)
+	opt.TransferPollInterval = defaultValue(opt.TransferPollInterval, 20)
+	opt.PromoteReattachInterval = defaultValue(opt.TransferPollInterval, 20)
 	if opt.Clock == nil {
 		opt.Clock = &realclock{}
 	}
 	if opt.ReceiveEventFilter == nil {
 		opt.ReceiveEventFilter = NewPerTailReceiveEventFilter()
+	}
+	if opt.InputSelectionStrategy == nil {
+		opt.InputSelectionStrategy = LeftToRightInputSelection
 	}
 	return opt
 }
@@ -148,27 +229,31 @@ func defaultAccountOpts(opts ...*AccountsOpts) *AccountsOpts {
 func NewAccount(seed Trytes, storage Store, api *api.API, opts ...*AccountsOpts) (*Account, error) {
 	opt := defaultAccountOpts(opts...)
 	acc := &Account{
-		id:              fmt.Sprintf("%x", md5.Sum([]byte(seed))),
-		seed:            seed,
-		request:         make(chan actionrequest),
-		sendBackChan:    make(chan actionresponse),
-		nextDepositAddr: make(chan depositgen),
-		exitDepositAddr: make(chan struct{}),
-		api:             api,
-		storage:         storage,
-		listeners: map[AccountEvent][]BundleEventChannel{
+		id:           fmt.Sprintf("%x", md5.Sum([]byte(seed))),
+		seed:         seed,
+		request:      make(chan actionrequest),
+		sendBackChan: make(chan actionresponse),
+		exit:         make(chan struct{}),
+		addrBuff:     make(chan addrindextuple, 10),
+		api:          api,
+		storage:      storage,
+		listeners: map[AccountEvent][]EventChannel{
 			EventSendingTransfer:   {},
 			EventTransferConfirmed: {},
 			EventReceivingDeposit:  {},
 			EventReceivedDeposit:   {},
 			EventReceivedMessage:   {},
+			EventPromotion:         {},
+			EventReattachment:      {},
 		},
-		mwm:                  opt.MWM,
-		depth:                opt.Depth,
-		secLvl:               opt.SecurityLevel,
-		transferPollInterval: opt.TransferPollInterval,
-		clock:                opt.Clock,
-		receiveEventFilter:   opt.ReceiveEventFilter,
+		inputSelectionStrat:     opt.InputSelectionStrategy,
+		mwm:                     opt.MWM,
+		depth:                   opt.Depth,
+		secLvl:                  opt.SecurityLevel,
+		transferPollInterval:    opt.TransferPollInterval,
+		promoteReattachInterval: opt.PromoteReattachInterval,
+		clock:                   opt.Clock,
+		receiveEventFilter:      opt.ReceiveEventFilter,
 	}
 	if err := acc.runEventLoop(); err != nil {
 		return nil, err
@@ -183,27 +268,31 @@ type Account struct {
 	seed Trytes
 
 	// internal event loop
-	request         chan actionrequest
-	sendBackChan    chan actionresponse
-	nextDepositAddr chan depositgen
-	exitDepositAddr chan struct{}
+	request      chan actionrequest
+	sendBackChan chan actionresponse
+	exit         chan struct{}
 
 	// misc
 	api     *api.API
 	storage Store
 	clock   Clock
 
+	// addr
+	addrFunc AddrFunc
+	addrBuff chan addrindextuple
+
 	// customization
-	inputselection       InputSelectionStrategyFunc
-	mwm                  uint64
-	depth                uint64
-	secLvl               consts.SecurityLevel
-	transferPollInterval uint64
+	inputSelectionStrat     InputSelectionStrategyFunc
+	mwm                     uint64
+	depth                   uint64
+	secLvl                  consts.SecurityLevel
+	transferPollInterval    uint64
+	promoteReattachInterval uint64
 
 	// event
 	eventsEnabled      bool
 	receiveEventFilter ReceiveEventFilter
-	listeners          map[AccountEvent][]BundleEventChannel
+	listeners          map[AccountEvent][]EventChannel
 }
 
 // Send sends the specified amount to the recipient address.
@@ -285,18 +374,19 @@ func (a *Account) TriggerTransferPolling() {
 }
 
 // RegisterEventHandler registers a new event handler.
-func (a *Account) RegisterEventHandler(event AccountEvent, channel BundleEventChannel) int {
-	eventListeners, ok := a.listeners[event]
-	if ! ok {
-		return -1
-	}
-	eventListeners = append(eventListeners, channel)
-	a.listeners[event] = eventListeners
-	return len(eventListeners) - 1
+func (a *Account) RegisterEventHandler(event AccountEvent) EventChannel {
+	eventListeners := a.listeners[event]
+	channel := eventchannel{make(chan interface{})}
+	a.listeners[event] = append(eventListeners, channel)
+	return channel
 }
 
 func (a *Account) sendError(err error) {
 	a.sendBackChan <- actionresponse{err: err}
+}
+
+func (a *Account) cleanup() {
+	close(a.exit)
 }
 
 func (a *Account) runEventLoop() error {
@@ -305,29 +395,68 @@ func (a *Account) runEventLoop() error {
 		return err
 	}
 
+	// start deposit address generator
+	addrFunc, err := a.startDepositAddrGenerator()
+	if err != nil {
+		return err
+	}
+	a.addrFunc = addrFunc
+
 	// warm up the receive event filter by polling once before starting the event loop
 	a.checkIncomingTransfers()
 	a.eventsEnabled = true
-
-	// start deposit address generator
-	go a.depositAddressGenerator()
 
 	// TODO: when there are pending transfers in the database but not a single tail transaction
 	// it means that the sending the transfer or storing the origin bundle tail hash failed.
 	// thereby before the account event loop starts, the missing tail hash should be added.
 
 	go func() {
+		defer func() {
+			if r := recover(); err != nil {
+				a.cleanup()
+				switch x := r.(type) {
+				case ErrMarkDepositAddr:
+					a.sendError(ErrAccountPanic{internalError: x})
+				}
+			}
+		}()
+
+		go func() {
+			for {
+				select {
+				case <-time.After(time.Duration(a.transferPollInterval) * time.Second):
+					a.pollTransfers()
+				case <-a.exit:
+					return
+				}
+			}
+		}()
+
+		go func() {
+			for {
+				select {
+				case <-time.After(time.Duration(a.promoteReattachInterval) * time.Second):
+					a.promoteAndReattach()
+				case <-a.exit:
+					return
+				}
+			}
+		}()
+
 		for {
 			select {
 			case req := <-a.request:
 				switch req.Action {
 				case action_send:
-					a.send(Recipients{req.Request.(Recipient)})
+					if err := a.send(Recipients{req.Request.(Recipient)}); err != nil {
+						a.sendError(err)
+					}
 				case action_multi_send:
-					a.send(req.Request.(Recipients))
+					if err := a.send(req.Request.(Recipients)); err != nil {
+						a.sendError(err)
+					}
 				case action_new_deposit_address:
-					payload := <-a.nextDepositAddr
-					a.sendBackChan <- actionresponse{item: payload.Addr, err: payload.Error}
+					a.sendBackChan <- actionresponse{item: a.addrFunc()}
 				case action_current_balance:
 					balance, err := a.balance()
 					a.sendBackChan <- actionresponse{item: balance, err: err}
@@ -337,43 +466,50 @@ func (a *Account) runEventLoop() error {
 					state, err := a.storage.LoadAccount(a.id)
 					a.sendBackChan <- actionresponse{item: state.IsNew(), err: err}
 				case action_shutdown:
-					// release deposit address generator
-					close(a.exitDepositAddr)
+					a.cleanup()
 					a.sendBackChan <- actionresponse{}
 					// exit event loop
 					return
 				}
-			case <-time.After(time.Duration(a.transferPollInterval) * time.Second):
-				a.pollTransfers()
 			}
 		}
 	}()
 	return nil
 }
 
-func (a *Account) depositAddressGenerator() {
-	for {
-		state, err := a.storage.LoadAccount(a.id)
-		if err != nil {
-			a.nextDepositAddr <- depositgen{Error: err}
-			continue
-		}
-		nextIndex := state.lastKeyIndex + 1
-		depositAddr, err := address.GenerateAddress(a.seed, nextIndex, a.secLvl, true)
-		if err != nil {
-			a.nextDepositAddr <- depositgen{Error: err}
-			continue
-		}
-		if err := a.storage.MarkDepositAddresses(a.id, nextIndex); err != nil {
-			a.nextDepositAddr <- depositgen{Error: err}
-			continue
-		}
-		select {
-		case a.nextDepositAddr <- depositgen{Addr: depositAddr}:
-		case <-a.exitDepositAddr:
-			return
-		}
+type AddrFunc func() Hash
+
+func (a *Account) startDepositAddrGenerator() (AddrFunc, error) {
+	state, err := a.storage.LoadAccount(a.id)
+	if err != nil {
+		return nil, err
 	}
+
+	// generating N addresses ahead into the buffer
+	go func() {
+		startIndex := state.lastKeyIndex + 1
+		for {
+			addr, err := address.GenerateAddress(a.seed, startIndex, a.secLvl, true)
+			if err != nil {
+				panic(err)
+			}
+			select {
+			case a.addrBuff <- addrindextuple{addr, startIndex}:
+			case <-a.exit:
+				return
+			}
+			startIndex++
+		}
+	}()
+
+	addrFunc := func() Hash {
+		tuple := <-a.addrBuff
+		if err := a.storage.MarkDepositAddresses(a.id, tuple.index); err != nil {
+			panic(ErrMarkDepositAddr{err})
+		}
+		return tuple.addr
+	}
+	return addrFunc, nil
 }
 
 func (a *Account) emitEvent(payload interface{}, event AccountEvent) {
@@ -382,33 +518,21 @@ func (a *Account) emitEvent(payload interface{}, event AccountEvent) {
 		return
 	}
 
-	eventListeners := a.listeners[event]
+	if event == EventError {
+		a.errors <- payload.(ErrorEvent)
+		return
+	}
 
-	switch event {
-	case EventSendingTransfer:
-		fallthrough
-	case EventReceivingDeposit:
-		fallthrough
-	case EventTransferConfirmed:
-		fallthrough
-	case EventReceivedDeposit:
-		fallthrough
-	case EventReceivedMessage:
-		for _, listener := range eventListeners {
-			select {
-			case listener <- payload.(bundle.Bundle):
-			default:
-			}
-		}
-	case EventError:
+	eventListeners := a.listeners[event]
+	for _, listener := range eventListeners {
 		select {
-		case a.errors <- payload.(ErrorEvent):
+		case listener.Channel() <- payload:
 		default:
 		}
 	}
 }
 
-func (a *Account) send(targets Recipients) {
+func (a *Account) send(targets Recipients) error {
 	var inputs []api.Input
 	var remainderAddress *Hash
 	var sum uint64
@@ -416,20 +540,15 @@ func (a *Account) send(targets Recipients) {
 
 	transferSum := targets.Sum()
 	if transferSum > 0 {
-		sum, inputs, err = a.selectInputs(transferSum)
+		sum, inputs, err = a.inputSelectionStrat(a, transferSum)
 		if err != nil {
-			a.sendError(err)
-			return
+			return err
 		}
 		// generate a remainder address for the transfer
 		// by adding it to the store
 		if sum > transferSum {
-			payload := <-a.nextDepositAddr
-			if payload.Error != nil {
-				a.sendError(payload.Error)
-				return
-			}
-			remainderAddress = &payload.Addr
+			addr := a.addrFunc()
+			remainderAddress = &addr
 		}
 
 		// TODO: maybe check for target address spent state?
@@ -447,44 +566,57 @@ func (a *Account) send(targets Recipients) {
 
 	bundleTrytes, err := a.api.PrepareTransfers(a.seed, transfers, opts)
 	if err != nil {
-		a.sendError(err)
-		return
+		return err
 	}
 
-	indices := make([]uint64, len(inputs))
+	spentAddrIndices := make([]uint64, len(inputs))
 	for i, input := range inputs {
-		indices[i] = input.KeyIndex
+		spentAddrIndices[i] = input.KeyIndex
+	}
+
+	tips, err := a.api.GetTransactionsToApprove(a.depth)
+	if err != nil {
+		return err
+	}
+
+	powedTrytes, err := a.api.AttachToTangle(tips.TrunkTransaction, tips.BranchTransaction, a.mwm, bundleTrytes)
+	if err != nil {
+		return err
+	}
+
+	tailTx, err := transaction.AsTransactionObject(powedTrytes[0])
+	if err != nil {
+		return err
 	}
 
 	// add the new transfer to the db
-	if err := a.storage.AddPendingTransfer(a.id, bundleTrytes, indices...); err != nil {
-		a.sendError(err)
-		return
+	if err := a.storage.AddPendingTransfer(a.id, tailTx.Hash, powedTrytes, spentAddrIndices...); err != nil {
+		return err
 	}
 
-	bndl, err := a.api.SendTrytes(bundleTrytes, a.depth, a.mwm)
+	bndlTrytes, err := a.api.StoreAndBroadcast(powedTrytes)
 	if err != nil {
-		a.sendError(err)
-		return
+		return err
 	}
 
-	if err := a.storage.AddTailHash(a.id, bndl[0].Bundle, bndl[0].Hash); err != nil {
-		a.sendError(err)
-		return
+	bndl, err := transaction.AsTransactionObjects(bndlTrytes, nil)
+	if err != nil {
+		return err
 	}
-
 	a.emitEvent(bndl, EventSendingTransfer)
 	a.sendBackChan <- actionresponse{item: bndl}
+	return nil
 }
 
-// selects addresses as inputs which are deposit addresses,
+// LeftToRightInputSelection selects addresses as inputs which are deposit addresses,
 // have no incoming transfers and have funds.
-func (a *Account) selectInputs(transferValue uint64) (uint64, []api.Input, error) {
+func LeftToRightInputSelection(a *Account, transferValue uint64) (uint64, []api.Input, error) {
 	state, err := a.storage.LoadAccount(a.id)
 	if err != nil {
 		return 0, nil, err
 	}
-	addrsToQuery := Hashes{}
+
+	var sum uint64
 	inputs := []api.Input{}
 	for _, index := range state.DepositAddresses() {
 		has, err := a.hasIncomingTransfer(index)
@@ -498,31 +630,26 @@ func (a *Account) selectInputs(transferValue uint64) (uint64, []api.Input, error
 		if err != nil {
 			return 0, nil, err
 		}
-		addrsToQuery = append(addrsToQuery, addr)
-		input := api.Input{
-			Address:  addr,
-			KeyIndex: index,
-			Security: a.secLvl,
-			Balance:  0,
+
+		balances, err := a.api.GetBalances(Hashes{addr}, 100)
+		if err != nil {
+			return 0, nil, err
 		}
-		inputs = append(inputs, input)
-	}
 
-	balances, err := a.api.GetBalances(addrsToQuery, 100)
-	if err != nil {
-		return 0, nil, err
-	}
-
-	var sum uint64
-	// inputs without zero balance
-	filteredInputs := []api.Input{}
-	for i, balance := range balances.Balances {
+		balance := balances.Balances[0]
 		if balance == 0 {
 			continue
 		}
 		sum += balance
-		inputs[i].Balance = balance
-		filteredInputs = append(filteredInputs, inputs[i])
+
+		input := api.Input{
+			Address:  addr,
+			KeyIndex: index,
+			Security: a.secLvl,
+			Balance:  balance,
+		}
+
+		inputs = append(inputs, input)
 		if sum > transferValue {
 			break
 		}
@@ -532,7 +659,7 @@ func (a *Account) selectInputs(transferValue uint64) (uint64, []api.Input, error
 		return 0, nil, consts.ErrInsufficientBalance
 	}
 
-	return sum, filteredInputs, nil
+	return sum, inputs, nil
 }
 
 func (a *Account) balance() (uint64, error) {
@@ -604,7 +731,7 @@ func (a *Account) pollTransfers() {
 
 func (a *Account) checkOutgoingTransfers() {
 	state, _ := a.storage.LoadAccount(a.id)
-	for _, pendingTransfer := range state.PendingTransfers {
+	for tailTx, pendingTransfer := range state.PendingTransfers {
 		if len(pendingTransfer.Tails) == 0 {
 			continue
 		}
@@ -622,7 +749,7 @@ func (a *Account) checkOutgoingTransfers() {
 					return
 				}
 				a.emitEvent(bndl, EventTransferConfirmed)
-				if err := a.storage.RemovePendingTransfer(a.id, bndl[0].Bundle); err != nil {
+				if err := a.storage.RemovePendingTransfer(a.id, tailTx); err != nil {
 					a.emitEvent(ErrorEvent{Error: err, Type: ErrorEventOutgoingTransfers}, EventError)
 					return
 				}
@@ -668,6 +795,170 @@ func (a *Account) checkIncomingTransfers() {
 	// create the events to emit in the event system
 	for _, event := range a.receiveEventFilter.Filter(bndls, depsAddrs, spentAddrs) {
 		a.emitEvent(event.Bundle, event.Event)
+	}
+}
+
+const approxAboveMaxDepthMinutes = 11
+
+func aboveMaxDepth(ts time.Time) bool {
+	return time.Now().Sub(ts).Minutes() < approxAboveMaxDepthMinutes
+}
+
+const maxDepth = 15
+const referenceToOldMsg = "reference transaction is too old"
+
+var emptySeed = strings.Repeat("9", 81)
+var ErrUnpromotableTail = errors.New("tail is unpromoteable")
+
+func (a *Account) promoteAndReattach() {
+	state, err := a.storage.LoadAccount(a.id)
+	if err != nil {
+		return
+	}
+	if len(state.PendingTransfers) == 0 {
+		return
+	}
+	send := func(preparedBundle []Trytes, tips *api.TransactionsToApprove) (Hash, error) {
+		readyBundle, err := a.api.AttachToTangle(tips.TrunkTransaction, tips.BranchTransaction, a.mwm, preparedBundle)
+		if err != nil {
+			return "", err
+		}
+		readyBundle, err = a.api.StoreAndBroadcast(readyBundle)
+		if err != nil {
+			return "", err
+		}
+		tailTx, err := transaction.AsTransactionObject(readyBundle[0])
+		if err != nil {
+			return "", err
+		}
+		return tailTx.Hash, nil
+	}
+
+	promote := func(tailTx Hash) (Hash, error) {
+		depth := a.depth
+		for {
+			tips, err := a.api.GetTransactionsToApprove(depth, tailTx)
+			if err != nil {
+				if err.Error() == referenceToOldMsg {
+					depth++
+					if depth > maxDepth {
+						return "", ErrUnpromotableTail
+					}
+					continue
+				}
+			}
+			pTransfers := bundle.Transfers{bundle.EmptyTransfer}
+			preparedBundle, err := a.api.PrepareTransfers(emptySeed, pTransfers, api.PrepareTransfersOptions{})
+			if err != nil {
+				return "", err
+			}
+			return send(preparedBundle, tips)
+		}
+	}
+
+	reattach := func(essenceBndl bundle.Bundle) (Hash, error) {
+		tips, err := a.api.GetTransactionsToApprove(a.depth)
+		if err != nil {
+			return "", err
+		}
+		essenceTrytes, err := transaction.TransactionsToTrytes(essenceBndl)
+		if err != nil {
+			return "", err
+		}
+		return send(essenceTrytes, tips)
+	}
+
+	storeTailTxHash := func(key string, tailTxHash string, msg string, event ErrorType) bool {
+		if err := a.storage.AddTailHash(a.id, key, tailTxHash); err != nil {
+			// might have been removed by polling goroutine
+			if err == ErrPendingTransferNotFound {
+				return true
+			}
+			a.emitEvent(ErrorEvent{Error: errors.Wrap(err, msg), Type: event}, EventError)
+			return false
+		}
+		return true
+	}
+
+	for key, pendingTransfer := range state.PendingTransfers {
+		// search for a tail transaction which is consistent and above max depth
+		var tailToPromote string
+		// go in reverse order to start from the most recent tails
+		for i := len(pendingTransfer.Tails) - 1; i >= 0; i-- {
+			tailTx := pendingTransfer.Tails[i]
+			consistent, _, err := a.api.CheckConsistency(tailTx)
+			if err != nil {
+				continue
+			}
+
+			if !consistent {
+				continue
+			}
+
+			txTrytes, err := a.api.GetTrytes(tailTx)
+			if err != nil {
+				continue
+			}
+
+			tx, err := transaction.AsTransactionObject(txTrytes[0])
+			if err != nil {
+				continue
+			}
+
+			if !aboveMaxDepth(time.Unix(int64(tx.Timestamp), 0)) {
+				continue
+			}
+
+			tailToPromote = tailTx
+			break
+		}
+
+		bndl, err := essenceToBundle(pendingTransfer)
+		if err != nil {
+			continue
+		}
+
+		// promote as a tail was found
+		if len(tailToPromote) > 0 {
+			promoteTailTxHash, err := promote(tailToPromote)
+			if err != nil {
+				a.emitEvent(ErrorEvent{Error: errors.Wrap(err, "unable to promote"), Type: ErrorPromoteTransfer}, EventError)
+				continue
+			}
+			a.emitEvent(PromotionReattachmentEvent{
+				BundleHash:          bndl[0].Bundle,
+				PromotionTailTxHash: promoteTailTxHash,
+				OriginTailTxHash:    key,
+			}, EventPromotion)
+			storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash", ErrorPromoteTransfer)
+			continue
+		}
+
+		// reattach
+		reattachTailTxHash, err := reattach(bndl)
+		if err != nil {
+			a.emitEvent(ErrorEvent{Error: errors.Wrap(err, "unable to reattach bundle"), Type: ErrorReattachTransfer}, EventError)
+			continue
+		}
+		a.emitEvent(PromotionReattachmentEvent{
+			BundleHash:             bndl[0].Bundle,
+			OriginTailTxHash:       key,
+			ReattachmentTailTxHash: reattachTailTxHash,
+		}, EventReattachment)
+		if !storeTailTxHash(key, reattachTailTxHash, "unable to store reattachment tx tail hash", ErrorReattachTransfer) {
+			continue
+		}
+		promoteTailTxHash, err := promote(reattachTailTxHash)
+		if err != nil {
+			a.emitEvent(ErrorEvent{Error: errors.Wrap(err, "unable to promote reattached bundle"), Type: ErrorPromoteTransfer}, EventError)
+			continue
+		}
+		a.emitEvent(PromotionReattachmentEvent{
+			BundleHash:          bndl[0].Bundle,
+			OriginTailTxHash:    key,
+			PromotionTailTxHash: promoteTailTxHash,
+		}, EventPromotion)
+		storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash for reattachment", ErrorPromoteTransfer)
 	}
 }
 
