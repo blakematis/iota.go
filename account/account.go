@@ -235,6 +235,7 @@ func NewAccount(seed Trytes, storage Store, api *api.API, opts ...*AccountsOpts)
 		sendBackChan: make(chan actionresponse),
 		exit:         make(chan struct{}),
 		addrBuff:     make(chan addrindextuple, 10),
+		errors:       make(chan ErrorEvent),
 		api:          api,
 		storage:      storage,
 		listeners: map[AccountEvent][]EventChannel{
@@ -798,7 +799,7 @@ func (a *Account) checkIncomingTransfers() {
 	}
 }
 
-const approxAboveMaxDepthMinutes = 11
+const approxAboveMaxDepthMinutes = 5
 
 func aboveMaxDepth(ts time.Time) bool {
 	return time.Now().Sub(ts).Minutes() < approxAboveMaxDepthMinutes
@@ -811,6 +812,7 @@ var emptySeed = strings.Repeat("9", 81)
 var ErrUnpromotableTail = errors.New("tail is unpromoteable")
 
 func (a *Account) promoteAndReattach() {
+	prStart := time.Now()
 	state, err := a.storage.LoadAccount(a.id)
 	if err != nil {
 		return
@@ -818,6 +820,7 @@ func (a *Account) promoteAndReattach() {
 	if len(state.PendingTransfers) == 0 {
 		return
 	}
+
 	send := func(preparedBundle []Trytes, tips *api.TransactionsToApprove) (Hash, error) {
 		readyBundle, err := a.api.AttachToTangle(tips.TrunkTransaction, tips.BranchTransaction, a.mwm, preparedBundle)
 		if err != nil {
@@ -846,6 +849,7 @@ func (a *Account) promoteAndReattach() {
 					}
 					continue
 				}
+				return "", err
 			}
 			pTransfers := bundle.Transfers{bundle.EmptyTransfer}
 			preparedBundle, err := a.api.PrepareTransfers(emptySeed, pTransfers, api.PrepareTransfersOptions{})
@@ -930,7 +934,7 @@ func (a *Account) promoteAndReattach() {
 				PromotionTailTxHash: promoteTailTxHash,
 				OriginTailTxHash:    key,
 			}, EventPromotion)
-			storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash", ErrorPromoteTransfer)
+			//storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash", ErrorPromoteTransfer)
 			continue
 		}
 
@@ -958,8 +962,10 @@ func (a *Account) promoteAndReattach() {
 			OriginTailTxHash:    key,
 			PromotionTailTxHash: promoteTailTxHash,
 		}, EventPromotion)
-		storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash for reattachment", ErrorPromoteTransfer)
+		//storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash for reattachment", ErrorPromoteTransfer)
 	}
+
+	fmt.Println("promote and reattachment cycle took", time.Now().Sub(prStart).Seconds())
 }
 
 // ReceiveEventFilter filters and creates events given the incoming bundles, deposit and spent addresses.
