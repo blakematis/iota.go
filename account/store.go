@@ -1,6 +1,7 @@
 package account
 
 import (
+	"fmt"
 	"github.com/iotaledger/iota.go/bundle"
 	"github.com/iotaledger/iota.go/consts"
 	"github.com/iotaledger/iota.go/transaction"
@@ -18,22 +19,34 @@ func newaccountstate() *AccountState {
 
 type DepositConditions struct {
 	DepositRequest
-	Address Hash
+	Address Hash `json:"address"`
+}
+
+type DepositConditionField string
+
+const (
+	ConditionExpires  = "t"
+	ConditionMultiUse = "m"
+	ConditionAmount   = "am"
+)
+
+func (dc *DepositConditions) URL() string {
+	return fmt.Sprintf("iota://%s/?t=%d&m=%v&am=%d", dc.Address, dc.TimeoutOn.Unix(), dc.MultiUse, dc.ExpectedAmount)
 }
 
 type DepositRequest struct {
 	// the timeout after this deposit address becomes invalid (creation+timeout)
-	TimeoutOn *time.Time
+	TimeoutOn *time.Time `json:"timeout_on"`
 	// whether to expect multiple deposits to this address
 	// in the given timeout.
 	// if this flag is false, the deposit address is considered
 	// in the input selection as soon as one deposit is available
 	// (if the expected amount is set and also fulfilled)
-	MultiUse bool
+	MultiUse bool `json:"multi_use"`
 	// the expected amount which gets deposited.
 	// if the timeout is hit, the address is automatically
 	// considered in the input selection.
-	ExpectedAmount *uint64
+	ExpectedAmount *uint64 `json:"expected_amount"`
 }
 
 type AccountState struct {

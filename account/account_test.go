@@ -89,9 +89,10 @@ var _ = Describe("Account", func() {
 		Context("NewDepositAddress()", func() {
 			It("should return the correct address", func() {
 				for _, compareAddr := range addrs {
-					depositAddr, err := acc.NewDepositAddress()
+					t := time.Now().AddDate(0, 0, 1)
+					depositAddr, err := acc.NewDepositRequest(&account.DepositRequest{TimeoutOn: &t})
 					Expect(err).ToNot(HaveOccurred())
-					Expect(depositAddr).To(Equal(compareAddr))
+					Expect(depositAddr.Address).To(Equal(compareAddr))
 				}
 			})
 		})
@@ -103,23 +104,27 @@ var _ = Describe("Account", func() {
 
 			It("returns the correct balance", func() {
 				defer gock.Flush()
-				gock.New(DefaultLocalIRIURI).
-					Post("/").
-					MatchType("json").
-					JSON(GetBalancesCommand{
-						Command:   GetBalancesCmd,
-						Addresses: addrsWC[:3],
-						Threshold: 100,
-					}).
-					Reply(200).
-					JSON(GetBalancesResponse{
-						Duration:       100,
-						Balances:       []string{"10", "20", "30"},
-						Milestone:      strings.Repeat("M", 81),
-						MilestoneIndex: 1,
-					})
+				balances := []string{"10", "20", "30"}
 				for i := 0; i < 3; i++ {
-					_, err := acc.NewDepositAddress()
+					gock.New(DefaultLocalIRIURI).
+						Post("/").
+						MatchType("json").
+						JSON(GetBalancesCommand{
+							Command:   GetBalancesCmd,
+							Addresses: trinary.Hashes{addrsWC[i]},
+							Threshold: 100,
+						}).
+						Reply(200).
+						JSON(GetBalancesResponse{
+							Duration:       100,
+							Balances:       []string{balances[i]},
+							Milestone:      strings.Repeat("M", 81),
+							MilestoneIndex: 1,
+						})
+				}
+				t := time.Now().AddDate(0, 0, 1)
+				for i := 0; i < 3; i++ {
+					_, err := acc.NewDepositRequest(&account.DepositRequest{TimeoutOn: &t})
 					Expect(err).ToNot(HaveOccurred())
 				}
 				balance, err := acc.Balance()
@@ -222,7 +227,8 @@ var _ = Describe("Account", func() {
 					Reply(200)
 
 				// hypothetical deposit address given to someone and got some funds
-				_, err = acc.NewDepositAddress()
+				t := time.Now().AddDate(0, 0, 1)
+				_, err = acc.NewDepositRequest(&account.DepositRequest{TimeoutOn: &t})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("having the correct current balance")

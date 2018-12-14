@@ -50,16 +50,6 @@ var _ = Describe("BadgerDB", func() {
 		Expect(state.IsNew()).To(BeTrue())
 	})
 
-	Context("addresses", func() {
-		It("marks deposit addresses", func() {
-			err := store.MarkDepositAddresses(id, 1)
-			Expect(err).ToNot(HaveOccurred())
-			state, err = store.LoadAccount(id)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(state.UsedAddresses).To(Equal([]int64{-1}))
-		})
-	})
-
 	Context("AddPendingTransfer()", func() {
 		It("adds the pending zero value transfer to the store", func() {
 			err := store.AddPendingTransfer(id, tx.Hash, zeroValBundleTrytes)
