@@ -33,6 +33,9 @@ func (err ErrAccountPanic) Error() string {
 	return fmt.Sprintf("severe account error (panic): %s", err.internalError.Error())
 }
 
+var ErrTimeoutNotSpecified = errors.New("deposit requests must have a timeout")
+var ErrTimeoutTooLow = errors.New("deposit requests must at least have a timeout of >2 minutes")
+
 type Clock interface {
 	Now() time.Time
 }
@@ -83,6 +86,7 @@ const (
 	ErrorEventIncomingTransfers
 	ErrorPromoteTransfer
 	ErrorReattachTransfer
+	ErrorInternal
 )
 
 type EventChannel interface {
@@ -125,9 +129,14 @@ func PromotionReattachmentChannel(channel EventChannel) <-chan PromotionReattach
 	return ch
 }
 
-type depositgen struct {
-	Addr  Hash
-	Error error
+type AccountListener struct {
+	Promotions       <-chan PromotionReattachmentEvent
+	Reattachments    <-chan PromotionReattachmentEvent
+	Sending          <-chan bundle.Bundle
+	Sent             <-chan bundle.Bundle
+	ReceivingDeposit <-chan bundle.Bundle
+	ReceivedDeposit  <-chan bundle.Bundle
+	ReceivedMessage  <-chan bundle.Bundle
 }
 
 type action byte
@@ -173,7 +182,7 @@ type actionresponse struct {
 	err  error
 }
 
-type InputSelectionStrategyFunc func(a *Account, transferValue uint64) (uint64, []api.Input, error)
+type InputSelectionStrategyFunc func(a *Account, transferValue uint64, balanceCheck ...bool) (uint64, []api.Input, []uint64, error)
 
 type addrindextuple struct {
 	addr  Hash
@@ -234,7 +243,7 @@ func NewAccount(seed Trytes, storage Store, api *api.API, opts ...*AccountsOpts)
 		request:      make(chan actionrequest),
 		sendBackChan: make(chan actionresponse),
 		exit:         make(chan struct{}),
-		addrBuff:     make(chan addrindextuple, 10),
+		addrBuff:     make(chan addrindextuple, 5),
 		errors:       make(chan ErrorEvent),
 		api:          api,
 		storage:      storage,
@@ -328,14 +337,20 @@ func (a *Account) SendMulti(recipients Recipients) (bundle.Bundle, error) {
 	return payload.item.(bundle.Bundle), nil
 }
 
-// NewDepositAddress generates a new deposit address.
-func (a *Account) NewDepositAddress() (Hash, error) {
-	a.request <- actionrequest{Action: action_new_deposit_address}
+// NewDepositRequest generates a new deposit request.
+func (a *Account) NewDepositRequest(req *DepositRequest) (*DepositConditions, error) {
+	if req.TimeoutOn == nil {
+		return nil, ErrTimeoutNotSpecified
+	}
+	if req.TimeoutOn.Add(-(time.Duration(2) * time.Minute)).Before(time.Now()) {
+		return nil, ErrTimeoutTooLow
+	}
+	a.request <- actionrequest{Action: action_new_deposit_address, Request: req}
 	payload := <-a.sendBackChan
 	if payload.err != nil {
-		return "", payload.err
+		return nil, payload.err
 	}
-	return payload.item.(Hash), nil
+	return payload.item.(*DepositConditions), nil
 }
 
 // Balance gets the current balance.
@@ -382,6 +397,29 @@ func (a *Account) RegisterEventHandler(event AccountEvent) EventChannel {
 	return channel
 }
 
+func ComposeEventListener(a *Account, events ...AccountEvent) AccountListener {
+	listener := AccountListener{}
+	for _, event := range events {
+		switch event {
+		case EventSendingTransfer:
+			listener.Sending = BundleChannel(a.RegisterEventHandler(event))
+		case EventTransferConfirmed:
+			listener.Sent = BundleChannel(a.RegisterEventHandler(event))
+		case EventReceivingDeposit:
+			listener.ReceivingDeposit = BundleChannel(a.RegisterEventHandler(event))
+		case EventReceivedDeposit:
+			listener.ReceivedDeposit = BundleChannel(a.RegisterEventHandler(event))
+		case EventReceivedMessage:
+			listener.ReceivedMessage = BundleChannel(a.RegisterEventHandler(event))
+		case EventPromotion:
+			listener.Promotions = PromotionReattachmentChannel(a.RegisterEventHandler(event))
+		case EventReattachment:
+			listener.Reattachments = PromotionReattachmentChannel(a.RegisterEventHandler(event))
+		}
+	}
+	return listener
+}
+
 func (a *Account) sendError(err error) {
 	a.sendBackChan <- actionresponse{err: err}
 }
@@ -397,7 +435,7 @@ func (a *Account) runEventLoop() error {
 	}
 
 	// start deposit address generator
-	addrFunc, err := a.startDepositAddrGenerator()
+	addrFunc, err := a.newDepositAddressGenerator()
 	if err != nil {
 		return err
 	}
@@ -457,7 +495,8 @@ func (a *Account) runEventLoop() error {
 						a.sendError(err)
 					}
 				case action_new_deposit_address:
-					a.sendBackChan <- actionresponse{item: a.addrFunc()}
+					depReq := req.Request.(*DepositRequest)
+					a.sendBackChan <- actionresponse{item: a.addrFunc(depReq)}
 				case action_current_balance:
 					balance, err := a.balance()
 					a.sendBackChan <- actionresponse{item: balance, err: err}
@@ -478,9 +517,9 @@ func (a *Account) runEventLoop() error {
 	return nil
 }
 
-type AddrFunc func() Hash
+type AddrFunc func(dep *DepositRequest) *DepositConditions
 
-func (a *Account) startDepositAddrGenerator() (AddrFunc, error) {
+func (a *Account) newDepositAddressGenerator() (AddrFunc, error) {
 	state, err := a.storage.LoadAccount(a.id)
 	if err != nil {
 		return nil, err
@@ -488,29 +527,29 @@ func (a *Account) startDepositAddrGenerator() (AddrFunc, error) {
 
 	// generating N addresses ahead into the buffer
 	go func() {
-		startIndex := state.lastKeyIndex + 1
-		for {
-			addr, err := address.GenerateAddress(a.seed, startIndex, a.secLvl, true)
+		for index := state.KeyIndex + 1; ; index++ {
+			addr, err := address.GenerateAddress(a.seed, index, a.secLvl, true)
 			if err != nil {
 				panic(err)
 			}
+			if err := a.storage.WriteIndex(a.id, index); err != nil {
+				panic(err)
+			}
 			select {
-			case a.addrBuff <- addrindextuple{addr, startIndex}:
+			case a.addrBuff <- addrindextuple{addr, index}:
 			case <-a.exit:
 				return
 			}
-			startIndex++
 		}
 	}()
 
-	addrFunc := func() Hash {
+	return func(req *DepositRequest) *DepositConditions {
 		tuple := <-a.addrBuff
-		if err := a.storage.MarkDepositAddresses(a.id, tuple.index); err != nil {
+		if err := a.storage.AddDepositRequest(a.id, tuple.index, req); err != nil {
 			panic(ErrMarkDepositAddr{err})
 		}
-		return tuple.addr
-	}
-	return addrFunc, nil
+		return &DepositConditions{Address: tuple.addr, DepositRequest: *req}
+	}, nil
 }
 
 func (a *Account) emitEvent(payload interface{}, event AccountEvent) {
@@ -536,20 +575,24 @@ func (a *Account) emitEvent(payload interface{}, event AccountEvent) {
 func (a *Account) send(targets Recipients) error {
 	var inputs []api.Input
 	var remainderAddress *Hash
-	var sum uint64
 	var err error
 
 	transferSum := targets.Sum()
+	forRemoval := []uint64{}
 	if transferSum > 0 {
-		sum, inputs, err = a.inputSelectionStrat(a, transferSum)
+		// gather the total sum, inputs, addresses to remove from the store
+		sum, ins, rem, err := a.inputSelectionStrat(a, transferSum)
 		if err != nil {
 			return err
 		}
-		// generate a remainder address for the transfer
-		// by adding it to the store
+		inputs = ins
+		forRemoval = rem
+
+		// store and add remainder address to transfer
 		if sum > transferSum {
-			addr := a.addrFunc()
-			remainderAddress = &addr
+			remainder := sum - transferSum
+			depCond := a.addrFunc(&DepositRequest{ExpectedAmount: &remainder})
+			remainderAddress = &depCond.Address
 		}
 
 		// TODO: maybe check for target address spent state?
@@ -570,11 +613,6 @@ func (a *Account) send(targets Recipients) error {
 		return err
 	}
 
-	spentAddrIndices := make([]uint64, len(inputs))
-	for i, input := range inputs {
-		spentAddrIndices[i] = input.KeyIndex
-	}
-
 	tips, err := a.api.GetTransactionsToApprove(a.depth)
 	if err != nil {
 		return err
@@ -591,7 +629,7 @@ func (a *Account) send(targets Recipients) error {
 	}
 
 	// add the new transfer to the db
-	if err := a.storage.AddPendingTransfer(a.id, tailTx.Hash, powedTrytes, spentAddrIndices...); err != nil {
+	if err := a.storage.AddPendingTransfer(a.id, tailTx.Hash, powedTrytes, forRemoval...); err != nil {
 		return err
 	}
 
@@ -611,83 +649,215 @@ func (a *Account) send(targets Recipients) error {
 
 // LeftToRightInputSelection selects addresses as inputs which are deposit addresses,
 // have no incoming transfers and have funds.
-func LeftToRightInputSelection(a *Account, transferValue uint64) (uint64, []api.Input, error) {
+func LeftToRightInputSelection(a *Account, transferValue uint64, balanceCheck ...bool) (uint64, []api.Input, []uint64, error) {
 	state, err := a.storage.LoadAccount(a.id)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 
-	var sum uint64
-	inputs := []api.Input{}
-	for _, index := range state.DepositAddresses() {
-		has, err := a.hasIncomingTransfer(index)
-		if err != nil {
-			return 0, nil, err
-		}
-		if has {
-			continue
-		}
-		addr, err := address.GenerateAddress(a.seed, index, a.secLvl)
-		if err != nil {
-			return 0, nil, err
-		}
+	var balanceCheckOnly bool
+	if len(balanceCheck) > 0 {
+		balanceCheckOnly = true
+	}
 
-		balances, err := a.api.GetBalances(Hashes{addr}, 100)
+	// no deposit requests, therefore 0 balance
+	if len(state.DepositRequests) == 0 && balanceCheckOnly {
+		return 0, nil, nil, nil
+	}
+
+	if len(state.DepositRequests) == 0 {
+		return 0, nil, nil, consts.ErrInsufficientBalance
+	}
+
+	now := time.Now()
+	selected := []api.Input{}
+	selectedTimedout := []uint64{}
+	toRemove := []uint64{}
+
+	addForRemove := func(keyIndex uint64) {
+		if balanceCheckOnly {
+			return
+		}
+		toRemove = append(toRemove, keyIndex)
+	}
+
+	selectIndex := func(keyIndex uint64, expectedAmount uint64) error {
+		addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
+		resp, err := a.api.GetBalances(Hashes{addr}, 100)
 		if err != nil {
-			return 0, nil, err
+			return err
 		}
-
-		balance := balances.Balances[0]
-		if balance == 0 {
-			continue
+		balance := resp.Balances[0]
+		if balance < expectedAmount {
+			return nil
 		}
-		sum += balance
-
-		input := api.Input{
+		selected = append(selected, api.Input{
+			KeyIndex: keyIndex,
 			Address:  addr,
-			KeyIndex: index,
 			Security: a.secLvl,
 			Balance:  balance,
+		})
+		return nil
+	}
+
+	for keyIndex, req := range state.DepositRequests {
+		// remainder address
+		if req.TimeoutOn == nil {
+			if req.ExpectedAmount == nil {
+				panic("remainder address in system without 'expected amount'")
+			}
+			if err := selectIndex(keyIndex, *req.ExpectedAmount); err != nil {
+				return 0, nil, nil, err
+			}
 		}
 
-		inputs = append(inputs, input)
-		if sum > transferValue {
+		// timed out
+		if now.After(*req.TimeoutOn) {
+			selectedTimedout = append(selectedTimedout, keyIndex)
+			continue
+		}
+
+		// multi
+		if req.MultiUse {
+			// multi use deposit addresses are only used
+			// when they are timed out, if they don't define an expected amount
+			if req.ExpectedAmount == nil {
+				continue
+			}
+			if err := selectIndex(keyIndex, *req.ExpectedAmount); err != nil {
+				return 0, nil, nil, err
+			}
+			continue
+		}
+
+		// single
+		if req.ExpectedAmount == nil {
+			addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
+			resp, err := a.api.GetBalances(Hashes{addr}, 100)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			selected = append(selected, api.Input{
+				Security: a.secLvl,
+				Address:  addr,
+				KeyIndex: keyIndex,
+				Balance:  resp.Balances[0],
+			})
+			continue
+		}
+
+		if err := selectIndex(keyIndex, *req.ExpectedAmount); err != nil {
+			return 0, nil, nil, err
+		}
+	}
+
+	inputs := []api.Input{}
+	addAsInput := func(input *api.Input) {
+		if balanceCheckOnly {
+			return
+		}
+		inputs = append(inputs, *input)
+	}
+	var sum uint64
+	for i := range selected {
+		input := &selected[i]
+		sum += input.Balance
+		addAsInput(input)
+		if sum > transferValue && !balanceCheckOnly {
 			break
 		}
 	}
 
-	if sum < transferValue {
-		return 0, nil, consts.ErrInsufficientBalance
+	if sum < transferValue || balanceCheckOnly {
+		for _, keyIndex := range selectedTimedout {
+			addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
+
+			// check whether has incoming consistent value transfer
+			// and if so, don't use it in the input selection
+			// (even though the address is timed out)
+			var hasIncomingConsistentTransfer bool
+			bndls, err := a.api.GetBundlesFromAddresses(Hashes{addr}, true)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			for i := range bndls {
+				if *(bndls[i][0]).Persistence {
+					continue
+				}
+				// check whether it's even a deposit to the address we are checking
+				var isDepositToAddr bool
+				for j := range bndls[i] {
+					if bndls[i][j].Address == addr {
+						if bndls[i][j].Value > 0 {
+							isDepositToAddr = true
+							break
+						}
+					}
+				}
+
+				// ignore this transfer as it isn't an incoming value transfer
+				if !isDepositToAddr {
+					continue
+				}
+
+				// here we have a bundle which is not yet confirmed
+				// and is depositing something onto this address.
+				// lets check it for consistency
+				consistent, _, err := a.api.CheckConsistency(bndls[i][0].Hash)
+				if err != nil {
+					return 0, nil, nil, err
+				}
+				if consistent {
+					hasIncomingConsistentTransfer = true
+					break
+				}
+			}
+
+			if hasIncomingConsistentTransfer {
+				continue
+			}
+
+			resp, err := a.api.GetBalances(Hashes{addr}, 100)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+
+			balance := resp.Balances[0]
+			// remove if there's no incoming consistent transfer
+			// and the balance is zero to free up the store
+			if balance == 0 {
+				if err := a.storage.RemoveDepositRequest(a.id, keyIndex); err != nil {
+					a.emitEvent(ErrorEvent{Error: err, Type: ErrorInternal}, EventError)
+				}
+				continue
+			}
+			addForRemove(keyIndex)
+			sum += balance
+			addAsInput(&api.Input{
+				KeyIndex: keyIndex,
+				Address:  addr,
+				Security: a.secLvl,
+				Balance:  balance,
+			})
+			if sum > transferValue && !balanceCheckOnly {
+				break
+			}
+		}
 	}
 
-	return sum, inputs, nil
+	if balanceCheckOnly {
+		return sum, nil, nil, nil
+	}
+
+	if sum < transferValue {
+		return 0, nil, nil, consts.ErrInsufficientBalance
+	}
+	return sum, inputs, toRemove, nil
 }
 
 func (a *Account) balance() (uint64, error) {
-	state, err := a.storage.LoadAccount(a.id)
-	if err != nil {
-		return 0, err
-	}
-	if state.IsNew() {
-		return 0, nil
-	}
-	addresses := make(Hashes, len(state.DepositAddresses()))
-	for i, index := range state.DepositAddresses() {
-		addr, err := address.GenerateAddress(a.seed, index, a.secLvl, true)
-		if err != nil {
-			return 0, err
-		}
-		addresses[i] = addr
-	}
-	balances, err := a.api.GetBalances(addresses, 100)
-	if err != nil {
-		return 0, err
-	}
-	var total uint64
-	for _, balance := range balances.Balances {
-		total += balance
-	}
-	return total, nil
+	usableBalance, _, _, err := a.inputSelectionStrat(a, 0, true)
+	return usableBalance, err
 }
 
 func (a *Account) hasIncomingTransfer(index uint64) (bool, error) {
@@ -762,39 +932,43 @@ func (a *Account) checkOutgoingTransfers() {
 
 func (a *Account) checkIncomingTransfers() {
 	state, _ := a.storage.LoadAccount(a.id)
-	depAddrsIndices := state.DepositAddresses()
-	depsAddrs := make(Hashes, len(depAddrsIndices))
-	if len(depsAddrs) == 0 {
+	if len(state.DepositRequests) == 0 {
 		return
 	}
 
-	spentAddrsIndices := state.SpentAddresses()
-	spentAddrs := make(Hashes, len(spentAddrsIndices))
-	for i, index := range depAddrsIndices {
-		addr, err := address.GenerateAddress(a.seed, index, a.secLvl, true)
+	depositAddresses := make(Hashes, len(state.DepositRequests))
+	i := 0
+	for keyIndex := range state.DepositRequests {
+		addr, err := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
 		if err != nil {
 			panic(err)
 		}
-		depsAddrs[i] = addr
+		depositAddresses[i] = addr
+		i++
 	}
 
-	for i, index := range spentAddrsIndices {
-		addr, err := address.GenerateAddress(a.seed, index, a.secLvl, true)
+	spentAddresses := Hashes{}
+	for _, transfer := range state.PendingTransfers {
+		bndl, err := essenceToBundle(transfer)
 		if err != nil {
 			panic(err)
 		}
-		spentAddrs[i] = addr
+		for j := range bndl {
+			if bndl[j].Value < 0 {
+				spentAddresses = append(spentAddresses, bndl[j].Address)
+			}
+		}
 	}
 
 	// get all bundles which operated on the current deposit depsAddrs
-	bndls, err := a.api.GetBundlesFromAddresses(depsAddrs, true)
+	bndls, err := a.api.GetBundlesFromAddresses(depositAddresses, true)
 	if err != nil {
 		a.emitEvent(ErrorEvent{Error: err, Type: ErrorEventIncomingTransfers}, EventError)
 		return
 	}
 
 	// create the events to emit in the event system
-	for _, event := range a.receiveEventFilter.Filter(bndls, depsAddrs, spentAddrs) {
+	for _, event := range a.receiveEventFilter.Filter(bndls, depositAddresses, spentAddresses) {
 		a.emitEvent(event.Bundle, event.Event)
 	}
 }
@@ -812,7 +986,6 @@ var emptySeed = strings.Repeat("9", 81)
 var ErrUnpromotableTail = errors.New("tail is unpromoteable")
 
 func (a *Account) promoteAndReattach() {
-	prStart := time.Now()
 	state, err := a.storage.LoadAccount(a.id)
 	if err != nil {
 		return
@@ -964,8 +1137,6 @@ func (a *Account) promoteAndReattach() {
 		}, EventPromotion)
 		//storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash for reattachment", ErrorPromoteTransfer)
 	}
-
-	fmt.Println("promote and reattachment cycle took", time.Now().Sub(prStart).Seconds())
 }
 
 // ReceiveEventFilter filters and creates events given the incoming bundles, deposit and spent addresses.

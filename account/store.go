@@ -6,46 +6,44 @@ import (
 	"github.com/iotaledger/iota.go/transaction"
 	. "github.com/iotaledger/iota.go/trinary"
 	"github.com/pkg/errors"
-	"math"
+	"time"
 )
 
 func newaccountstate() *AccountState {
 	return &AccountState{
-		UsedAddresses:    make([]int64, 0),
+		DepositRequests:  make(map[uint64]*DepositRequest, 0),
 		PendingTransfers: make(map[string]*pendingtransfer, 0),
 	}
 }
 
+type DepositConditions struct {
+	DepositRequest
+	Address Hash
+}
+
+type DepositRequest struct {
+	// the timeout after this deposit address becomes invalid (creation+timeout)
+	TimeoutOn *time.Time
+	// whether to expect multiple deposits to this address
+	// in the given timeout.
+	// if this flag is false, the deposit address is considered
+	// in the input selection as soon as one deposit is available
+	// (if the expected amount is set and also fulfilled)
+	MultiUse bool
+	// the expected amount which gets deposited.
+	// if the timeout is hit, the address is automatically
+	// considered in the input selection.
+	ExpectedAmount *uint64
+}
+
 type AccountState struct {
-	UsedAddresses    []int64                     `json:"used_addresses"`
+	KeyIndex         uint64                      `json:"key_index"`
+	DepositRequests  map[uint64]*DepositRequest  `json:"deposit_requests"`
 	PendingTransfers map[string]*pendingtransfer `json:"pending_transfers"`
-	lastKeyIndex     uint64
 }
 
 func (state *AccountState) IsNew() bool {
-	return len(state.UsedAddresses) == 0 && len(state.PendingTransfers) == 0
-}
-
-func (state *AccountState) DepositAddresses() []uint64 {
-	indices := []uint64{}
-	for _, index := range state.UsedAddresses {
-		if index > 0 {
-			continue
-		}
-		indices = append(indices, uint64(math.Abs(float64(index))))
-	}
-	return indices
-}
-
-func (state *AccountState) SpentAddresses() []uint64 {
-	indices := []uint64{}
-	for _, index := range state.UsedAddresses {
-		if index < 0 {
-			continue
-		}
-		indices = append(indices, uint64(index))
-	}
-	return indices
+	return len(state.DepositRequests) == 0 && len(state.PendingTransfers) == 0
 }
 
 type pendingtransfer struct {
@@ -53,14 +51,17 @@ type pendingtransfer struct {
 	Tails  Hashes  `json:"tails"`
 }
 
-var ErrAddrIndexNotFound = errors.New("address index not found")
 var ErrAccountNotFound = errors.New("account not found")
 var ErrPendingTransferNotFound = errors.New("pending transfer not found")
+var ErrDepositRequestNotFound = errors.New("deposit request not found")
 
 type Store interface {
 	LoadAccount(id string) (*AccountState, error)
 	RemoveAccount(id string) error
-	MarkDepositAddresses(id string, indices ...uint64) error
+	ReadIndex(id string) (uint64, error)
+	WriteIndex(id string, index uint64) error
+	AddDepositRequest(id string, index uint64, depositRequest *DepositRequest) error
+	RemoveDepositRequest(id string, index uint64) error
 	AddPendingTransfer(id string, tailTx Hash, bundleTrytes []Trytes, indices ...uint64) error
 	RemovePendingTransfer(id string, tailHash Hash) error
 	AddTailHash(id string, tailHash Hash, newTailTxHash Hash) error

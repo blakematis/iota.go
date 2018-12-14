@@ -5,7 +5,6 @@ import (
 	"github.com/dgraph-io/badger"
 	"github.com/iotaledger/iota.go/bundle"
 	. "github.com/iotaledger/iota.go/trinary"
-	"math"
 )
 
 func NewBadgerStore(dir string) (*BadgerStore, error) {
@@ -86,10 +85,6 @@ func (b *BadgerStore) LoadAccount(id string) (*AccountState, error) {
 		return nil, err
 	}
 	if state != nil {
-		if len(state.UsedAddresses) > 0 {
-			sliceIndex := len(state.UsedAddresses) - 1
-			state.lastKeyIndex = uint64(math.Abs(float64(state.UsedAddresses[sliceIndex])))
-		}
 		return state, nil
 	}
 	// if the account is nil, it doesn't exist, lets create it
@@ -113,11 +108,38 @@ func (b *BadgerStore) RemoveAccount(id string) error {
 	})
 }
 
-func (b *BadgerStore) MarkDepositAddresses(id string, indices ...uint64) error {
+func (b *BadgerStore) ReadIndex(id string) (uint64, error) {
+	var keyIndex uint64
+	if err := b.read(id, func(state *AccountState) error {
+		keyIndex = state.KeyIndex
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return keyIndex, nil
+}
+
+func (b *BadgerStore) WriteIndex(id string, index uint64) (error) {
 	return b.mutate(id, func(state *AccountState) error {
-		for _, index := range indices {
-			state.UsedAddresses = append(state.UsedAddresses, -int64(index))
+		state.KeyIndex = index
+		return nil
+	})
+}
+
+func (b *BadgerStore) AddDepositRequest(id string, index uint64, depositRequest *DepositRequest) error {
+	return b.mutate(id, func(state *AccountState) error {
+		state.DepositRequests[index] = depositRequest
+		return nil
+	})
+}
+
+func (b *BadgerStore) RemoveDepositRequest(id string, index uint64) error {
+	return b.mutate(id, func(state *AccountState) error {
+		_, ok := state.DepositRequests[index]
+		if !ok {
+			return ErrDepositRequestNotFound
 		}
+		delete(state.DepositRequests, index)
 		return nil
 	})
 }
@@ -125,20 +147,8 @@ func (b *BadgerStore) MarkDepositAddresses(id string, indices ...uint64) error {
 func (b *BadgerStore) AddPendingTransfer(id string, tailTx Hash, bundleTrytes []Trytes, indices ...uint64) error {
 	// essence: value, timestamp, current index, last index, obsolete tag
 	return b.mutate(id, func(state *AccountState) error {
-		// mark spent addresses
 		for _, index := range indices {
-			found := false
-			for i, usedIndex := range state.UsedAddresses {
-				usedIndexU := uint64(math.Abs(float64(usedIndex)))
-				if usedIndexU == index {
-					state.UsedAddresses[i] = int64(usedIndexU)
-					found = true
-					break
-				}
-			}
-			if !found {
-				return ErrAddrIndexNotFound
-			}
+			delete(state.DepositRequests, index)
 		}
 		pendingTransfer := trytesToPendingTransfer(bundleTrytes)
 		pendingTransfer.Tails = append(pendingTransfer.Tails, tailTx)

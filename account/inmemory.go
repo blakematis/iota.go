@@ -1,9 +1,9 @@
 package account
 
 import (
+	"encoding/json"
 	"github.com/iotaledger/iota.go/bundle"
 	"github.com/iotaledger/iota.go/trinary"
-	"math"
 	"sync"
 )
 
@@ -24,6 +24,15 @@ func (mem *InMemoryStore) Clear() {
 	mem.accs = map[string]*AccountState{}
 }
 
+func (mem *InMemoryStore) Dump() []byte {
+	mem.muAccs.Lock()
+	defer mem.muAccs.Unlock()
+	dump, err := json.MarshalIndent(mem.accs, "", "   ")
+	if err != nil {
+		panic(err)
+	}
+	return dump
+}
 func (mem *InMemoryStore) LoadAccount(id string) (*AccountState, error) {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
@@ -31,10 +40,6 @@ func (mem *InMemoryStore) LoadAccount(id string) (*AccountState, error) {
 	if !ok {
 		mem.accs[id] = newaccountstate()
 		return mem.accs[id], nil
-	}
-	if len(state.UsedAddresses) > 0 {
-		sliceIndex := len(state.UsedAddresses) - 1
-		state.lastKeyIndex = uint64(math.Abs(float64(state.UsedAddresses[sliceIndex])))
 	}
 	return state, nil
 }
@@ -50,16 +55,50 @@ func (mem *InMemoryStore) RemoveAccount(id string) error {
 	return nil
 }
 
-func (mem *InMemoryStore) MarkDepositAddresses(id string, indices ...uint64) error {
+func (mem *InMemoryStore) ReadIndex(id string) (uint64, error) {
+	mem.muAccs.Lock()
+	defer mem.muAccs.Unlock()
+	state, ok := mem.accs[id]
+	if !ok {
+		return 0, ErrAccountNotFound
+	}
+	return state.KeyIndex, nil
+}
+
+func (mem *InMemoryStore) WriteIndex(id string, index uint64) (error) {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
 	if !ok {
 		return ErrAccountNotFound
 	}
-	for _, index := range indices {
-		state.UsedAddresses = append(state.UsedAddresses, -int64(index))
+	state.KeyIndex = index
+	return nil
+}
+
+func (mem *InMemoryStore) AddDepositRequest(id string, index uint64, depositRequest *DepositRequest) error {
+	mem.muAccs.Lock()
+	defer mem.muAccs.Unlock()
+	state, ok := mem.accs[id]
+	if !ok {
+		return ErrAccountNotFound
 	}
+	state.DepositRequests[index] = depositRequest
+	return nil
+}
+
+func (mem *InMemoryStore) RemoveDepositRequest(id string, index uint64) error {
+	mem.muAccs.Lock()
+	defer mem.muAccs.Unlock()
+	state, ok := mem.accs[id]
+	if !ok {
+		return ErrAccountNotFound
+	}
+	_, ok = state.DepositRequests[index]
+	if !ok {
+		return ErrDepositRequestNotFound
+	}
+	delete(state.DepositRequests, index)
 	return nil
 }
 
@@ -71,23 +110,9 @@ func (mem *InMemoryStore) AddPendingTransfer(id string, tailTx trinary.Hash, bun
 		return ErrAccountNotFound
 	}
 
-	// mark spent addresses
-	prevState := make([]int64, len(state.UsedAddresses))
-	copy(prevState, state.UsedAddresses)
+	// remove used deposit actions
 	for _, index := range indices {
-		found := false
-		for i, usedIndex := range state.UsedAddresses {
-			usedIndexU := uint64(math.Abs(float64(usedIndex)))
-			if usedIndexU == index {
-				state.UsedAddresses[i] = int64(usedIndexU)
-				found = true
-				break
-			}
-		}
-		if !found {
-			state.UsedAddresses = prevState
-			return ErrAddrIndexNotFound
-		}
+		delete(state.DepositRequests, index)
 	}
 
 	pendingTransfer := trytesToPendingTransfer(bundleTrytes)
