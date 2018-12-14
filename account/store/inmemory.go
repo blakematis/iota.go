@@ -1,7 +1,8 @@
-package account
+package store
 
 import (
 	"encoding/json"
+	"github.com/iotaledger/iota.go/account/deposit"
 	"github.com/iotaledger/iota.go/bundle"
 	"github.com/iotaledger/iota.go/trinary"
 	"sync"
@@ -76,7 +77,7 @@ func (mem *InMemoryStore) WriteIndex(id string, index uint64) (error) {
 	return nil
 }
 
-func (mem *InMemoryStore) AddDepositRequest(id string, index uint64, depositRequest *DepositRequest) error {
+func (mem *InMemoryStore) AddDepositRequest(id string, index uint64, depositRequest *deposit.Request) error {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
@@ -115,7 +116,7 @@ func (mem *InMemoryStore) AddPendingTransfer(id string, tailTx trinary.Hash, bun
 		delete(state.DepositRequests, index)
 	}
 
-	pendingTransfer := trytesToPendingTransfer(bundleTrytes)
+	pendingTransfer := TrytesToPendingTransfer(bundleTrytes)
 	pendingTransfer.Tails = append(pendingTransfer.Tails, tailTx)
 	state.PendingTransfers[tailTx] = &pendingTransfer
 	return nil
@@ -162,7 +163,7 @@ func (mem *InMemoryStore) GetPendingTransfers(id string) (trinary.Hashes, bundle
 	tailTxs := make(trinary.Hashes, len(state.PendingTransfers))
 	i := 0
 	for tailTx, pendingTransfer := range state.PendingTransfers {
-		bndl, err := essenceToBundle(pendingTransfer)
+		bndl, err := EssenceToBundle(pendingTransfer)
 		if err != nil {
 			return nil, nil, err
 		}

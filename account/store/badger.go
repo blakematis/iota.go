@@ -1,8 +1,10 @@
-package account
+package store
 
 import (
-	"encoding/json"
+	"bytes"
+	"encoding/gob"
 	"github.com/dgraph-io/badger"
+	"github.com/iotaledger/iota.go/account/deposit"
 	"github.com/iotaledger/iota.go/bundle"
 	. "github.com/iotaledger/iota.go/trinary"
 )
@@ -39,18 +41,23 @@ func (b *BadgerStore) mutate(id string, mutFunc statemutationfunc) error {
 			return err
 		}
 		accountBytes, err := item.Value()
+		if err != nil {
+			return err
+		}
 		state := newaccountstate()
-		if err := json.Unmarshal(accountBytes, state); err != nil {
+		dec := gob.NewDecoder(bytes.NewReader(accountBytes))
+		if err := dec.Decode(state); err != nil {
 			return err
 		}
 		if err := mutFunc(state); err != nil {
 			return err
 		}
-		newStateBytes, err := json.Marshal(state)
-		if err != nil {
+		var buf bytes.Buffer
+		enc := gob.NewEncoder(&buf)
+		if err := enc.Encode(state); err != nil {
 			return err
 		}
-		return txn.Set(key, newStateBytes)
+		return txn.Set(key, buf.Bytes())
 	})
 }
 
@@ -65,8 +72,12 @@ func (b *BadgerStore) read(id string, readFunc statereadfunc) error {
 			return readFunc(nil)
 		}
 		accountBytes, err := item.Value()
+		if err != nil {
+			return err
+		}
 		state = newaccountstate()
-		if err := json.Unmarshal(accountBytes, state); err != nil {
+		dec := gob.NewDecoder(bytes.NewReader(accountBytes))
+		if err := dec.Decode(state); err != nil {
 			return err
 		}
 		return readFunc(state)
@@ -91,11 +102,12 @@ func (b *BadgerStore) LoadAccount(id string) (*AccountState, error) {
 	state = newaccountstate()
 	key := []byte(id)
 	if err := b.db.Update(func(txn *badger.Txn) error {
-		newStateBytes, err := json.Marshal(state)
-		if err != nil {
+		var buf bytes.Buffer
+		enc := gob.NewEncoder(&buf)
+		if err := enc.Encode(state); err != nil {
 			return err
 		}
-		return txn.Set(key, newStateBytes)
+		return txn.Set(key, buf.Bytes())
 	}); err != nil {
 		return nil, err
 	}
@@ -126,7 +138,7 @@ func (b *BadgerStore) WriteIndex(id string, index uint64) (error) {
 	})
 }
 
-func (b *BadgerStore) AddDepositRequest(id string, index uint64, depositRequest *DepositRequest) error {
+func (b *BadgerStore) AddDepositRequest(id string, index uint64, depositRequest *deposit.Request) error {
 	return b.mutate(id, func(state *AccountState) error {
 		state.DepositRequests[index] = depositRequest
 		return nil
@@ -150,7 +162,7 @@ func (b *BadgerStore) AddPendingTransfer(id string, tailTx Hash, bundleTrytes []
 		for _, index := range indices {
 			delete(state.DepositRequests, index)
 		}
-		pendingTransfer := trytesToPendingTransfer(bundleTrytes)
+		pendingTransfer := TrytesToPendingTransfer(bundleTrytes)
 		pendingTransfer.Tails = append(pendingTransfer.Tails, tailTx)
 		state.PendingTransfers[tailTx] = &pendingTransfer
 		return nil
@@ -186,7 +198,7 @@ func (b *BadgerStore) GetPendingTransfers(id string) (Hashes, bundle.Bundles, er
 		tailTxs = make(Hashes, len(state.PendingTransfers))
 		i := 0
 		for tailTx, pendingTransfer := range state.PendingTransfers {
-			bndl, err := essenceToBundle(pendingTransfer)
+			bndl, err := EssenceToBundle(pendingTransfer)
 			if err != nil {
 				return err
 			}

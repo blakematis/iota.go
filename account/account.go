@@ -3,6 +3,8 @@ package account
 import (
 	"crypto/md5"
 	"fmt"
+	"github.com/iotaledger/iota.go/account/deposit"
+	"github.com/iotaledger/iota.go/account/store"
 	"github.com/iotaledger/iota.go/address"
 	"github.com/iotaledger/iota.go/api"
 	"github.com/iotaledger/iota.go/bundle"
@@ -235,7 +237,7 @@ func defaultAccountOpts(opts ...*AccountsOpts) *AccountsOpts {
 	return opt
 }
 
-func NewAccount(seed Trytes, storage Store, api *api.API, opts ...*AccountsOpts) (*Account, error) {
+func NewAccount(seed Trytes, storage store.Store, api *api.API, opts ...*AccountsOpts) (*Account, error) {
 	opt := defaultAccountOpts(opts...)
 	acc := &Account{
 		id:           fmt.Sprintf("%x", md5.Sum([]byte(seed))),
@@ -284,7 +286,7 @@ type Account struct {
 
 	// misc
 	api     *api.API
-	storage Store
+	storage store.Store
 	clock   Clock
 
 	// addr
@@ -338,7 +340,7 @@ func (a *Account) SendMulti(recipients Recipients) (bundle.Bundle, error) {
 }
 
 // NewDepositRequest generates a new deposit request.
-func (a *Account) NewDepositRequest(req *DepositRequest) (*DepositConditions, error) {
+func (a *Account) NewDepositRequest(req *deposit.Request) (*deposit.Conditions, error) {
 	if req.TimeoutOn == nil {
 		return nil, ErrTimeoutNotSpecified
 	}
@@ -350,7 +352,7 @@ func (a *Account) NewDepositRequest(req *DepositRequest) (*DepositConditions, er
 	if payload.err != nil {
 		return nil, payload.err
 	}
-	return payload.item.(*DepositConditions), nil
+	return payload.item.(*deposit.Conditions), nil
 }
 
 // Balance gets the current balance.
@@ -445,10 +447,6 @@ func (a *Account) runEventLoop() error {
 	a.checkIncomingTransfers()
 	a.eventsEnabled = true
 
-	// TODO: when there are pending transfers in the database but not a single tail transaction
-	// it means that the sending the transfer or storing the origin bundle tail hash failed.
-	// thereby before the account event loop starts, the missing tail hash should be added.
-
 	go func() {
 		defer func() {
 			if r := recover(); err != nil {
@@ -495,7 +493,7 @@ func (a *Account) runEventLoop() error {
 						a.sendError(err)
 					}
 				case action_new_deposit_address:
-					depReq := req.Request.(*DepositRequest)
+					depReq := req.Request.(*deposit.Request)
 					a.sendBackChan <- actionresponse{item: a.addrFunc(depReq)}
 				case action_current_balance:
 					balance, err := a.balance()
@@ -517,7 +515,7 @@ func (a *Account) runEventLoop() error {
 	return nil
 }
 
-type AddrFunc func(dep *DepositRequest) *DepositConditions
+type AddrFunc func(dep *deposit.Request) *deposit.Conditions
 
 func (a *Account) newDepositAddressGenerator() (AddrFunc, error) {
 	state, err := a.storage.LoadAccount(a.id)
@@ -543,12 +541,12 @@ func (a *Account) newDepositAddressGenerator() (AddrFunc, error) {
 		}
 	}()
 
-	return func(req *DepositRequest) *DepositConditions {
+	return func(req *deposit.Request) *deposit.Conditions {
 		tuple := <-a.addrBuff
 		if err := a.storage.AddDepositRequest(a.id, tuple.index, req); err != nil {
 			panic(ErrMarkDepositAddr{err})
 		}
-		return &DepositConditions{Address: tuple.addr, DepositRequest: *req}
+		return &deposit.Conditions{Address: tuple.addr, Request: *req}
 	}, nil
 }
 
@@ -591,7 +589,7 @@ func (a *Account) send(targets Recipients) error {
 		// store and add remainder address to transfer
 		if sum > transferSum {
 			remainder := sum - transferSum
-			depCond := a.addrFunc(&DepositRequest{ExpectedAmount: &remainder})
+			depCond := a.addrFunc(&deposit.Request{ExpectedAmount: &remainder})
 			remainderAddress = &depCond.Address
 		}
 
@@ -763,6 +761,7 @@ func LeftToRightInputSelection(a *Account, transferValue uint64, balanceCheck ..
 		input := &selected[i]
 		sum += input.Balance
 		addAsInput(input)
+		addForRemove(input.KeyIndex)
 		if sum > transferValue && !balanceCheckOnly {
 			break
 		}
@@ -949,7 +948,7 @@ func (a *Account) checkIncomingTransfers() {
 
 	spentAddresses := Hashes{}
 	for _, transfer := range state.PendingTransfers {
-		bndl, err := essenceToBundle(transfer)
+		bndl, err := store.EssenceToBundle(transfer)
 		if err != nil {
 			panic(err)
 		}
@@ -1048,7 +1047,7 @@ func (a *Account) promoteAndReattach() {
 	storeTailTxHash := func(key string, tailTxHash string, msg string, event ErrorType) bool {
 		if err := a.storage.AddTailHash(a.id, key, tailTxHash); err != nil {
 			// might have been removed by polling goroutine
-			if err == ErrPendingTransferNotFound {
+			if err == store.ErrPendingTransferNotFound {
 				return true
 			}
 			a.emitEvent(ErrorEvent{Error: errors.Wrap(err, msg), Type: event}, EventError)
@@ -1090,7 +1089,7 @@ func (a *Account) promoteAndReattach() {
 			break
 		}
 
-		bndl, err := essenceToBundle(pendingTransfer)
+		bndl, err := store.EssenceToBundle(pendingTransfer)
 		if err != nil {
 			continue
 		}

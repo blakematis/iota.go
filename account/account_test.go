@@ -1,6 +1,8 @@
 package account_test
 
 import (
+	"github.com/iotaledger/iota.go/account/deposit"
+	"github.com/iotaledger/iota.go/account/store"
 	. "github.com/iotaledger/iota.go/api"
 	"github.com/iotaledger/iota.go/bundle"
 	"github.com/iotaledger/iota.go/consts"
@@ -58,11 +60,11 @@ var _ = Describe("Account", func() {
 	}
 
 	var acc *account.Account
-	var store *account.InMemoryStore
+	var st *store.InMemoryStore
 
 	newAccount := func() {
-		store = account.NewInMemoryStore()
-		acc, err = account.NewAccount(seed, store, api, &account.AccountsOpts{
+		st = store.NewInMemoryStore()
+		acc, err = account.NewAccount(seed, st, api, &account.AccountsOpts{
 			Depth: 3, MWM: 9, SecurityLevel: usedSecLvl, Clock: &fakeclock{},
 		})
 		if err != nil {
@@ -73,7 +75,7 @@ var _ = Describe("Account", func() {
 	Context("account creation", func() {
 		It("successfully creates accounts given valid parameters/options", func() {
 			var err error
-			acc, err = account.NewAccount(seed, account.NewInMemoryStore(), api, &account.AccountsOpts{
+			acc, err = account.NewAccount(seed, store.NewInMemoryStore(), api, &account.AccountsOpts{
 				Depth: 3, MWM: 9, SecurityLevel: usedSecLvl,
 			})
 			Expect(err).ToNot(HaveOccurred())
@@ -90,7 +92,7 @@ var _ = Describe("Account", func() {
 			It("should return the correct address", func() {
 				for _, compareAddr := range addrs {
 					t := time.Now().AddDate(0, 0, 1)
-					depositAddr, err := acc.NewDepositRequest(&account.DepositRequest{TimeoutOn: &t})
+					depositAddr, err := acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t})
 					Expect(err).ToNot(HaveOccurred())
 					Expect(depositAddr.Address).To(Equal(compareAddr))
 				}
@@ -124,7 +126,7 @@ var _ = Describe("Account", func() {
 				}
 				t := time.Now().AddDate(0, 0, 1)
 				for i := 0; i < 3; i++ {
-					_, err := acc.NewDepositRequest(&account.DepositRequest{TimeoutOn: &t})
+					_, err := acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t})
 					Expect(err).ToNot(HaveOccurred())
 				}
 				balance, err := acc.Balance()
@@ -228,7 +230,8 @@ var _ = Describe("Account", func() {
 
 				// hypothetical deposit address given to someone and got some funds
 				t := time.Now().AddDate(0, 0, 1)
-				_, err = acc.NewDepositRequest(&account.DepositRequest{TimeoutOn: &t})
+				expectedAmount := uint64(100)
+				_, err = acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t, ExpectedAmount: &expectedAmount})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("having the correct current balance")
@@ -307,7 +310,7 @@ var _ = Describe("Account", func() {
 				bundleFromEvent = <-bundleChan2
 				Expect(bundleFromEvent[0].Bundle).To(Equal(finalTxs[0].Bundle))
 
-				state, err := store.LoadAccount(id)
+				state, err := st.LoadAccount(id)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(len(state.PendingTransfers)).To(Equal(0))
 

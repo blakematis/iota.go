@@ -1,7 +1,7 @@
-package account_test
+package store_test
 
 import (
-	"github.com/iotaledger/iota.go/account"
+	"github.com/iotaledger/iota.go/account/store"
 	"github.com/iotaledger/iota.go/transaction"
 	"github.com/iotaledger/iota.go/trinary"
 	. "github.com/onsi/ginkgo"
@@ -37,29 +37,29 @@ var _ = Describe("BadgerDB", func() {
 		panic(err)
 	}
 
-	store, err := account.NewBadgerStore(badgerDBDir)
+	st, err := store.NewBadgerStore(badgerDBDir)
 	if err != nil {
 		panic(err)
 	}
 
-	var state *account.AccountState
+	var state *store.AccountState
 	It("loads correctly an empty account", func() {
 		var err error
-		state, err = store.LoadAccount(id)
+		state, err = st.LoadAccount(id)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(state.IsNew()).To(BeTrue())
 	})
 
 	Context("AddPendingTransfer()", func() {
 		It("adds the pending zero value transfer to the store", func() {
-			err := store.AddPendingTransfer(id, tx.Hash, zeroValBundleTrytes)
+			err := st.AddPendingTransfer(id, tx.Hash, zeroValBundleTrytes)
 			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 
 	Context("GetPendingTransfers()", func() {
 		It("returns all pending transfers", func() {
-			_, bndls, err := store.GetPendingTransfers(id)
+			_, bndls, err := st.GetPendingTransfers(id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(bndls[0][0].Address).To(Equal(tx.Address))
 		})
@@ -68,9 +68,9 @@ var _ = Describe("BadgerDB", func() {
 	Context("AddTailHash()", func() {
 		It("adds the given tail hash", func() {
 			newTail := strings.Repeat("A", 81)
-			err := store.AddTailHash(id, tx.Hash, newTail)
+			err := st.AddTailHash(id, tx.Hash, newTail)
 			Expect(err).ToNot(HaveOccurred())
-			state, err = store.LoadAccount(id)
+			state, err = st.LoadAccount(id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(state.PendingTransfers[tx.Hash].Tails[1]).To(Equal(newTail))
 		})
@@ -78,9 +78,9 @@ var _ = Describe("BadgerDB", func() {
 
 	Context("RemovePendingTransfer()", func() {
 		It("removes the given transfer", func() {
-			err := store.RemovePendingTransfer(id, tx.Hash)
+			err := st.RemovePendingTransfer(id, tx.Hash)
 			Expect(err).ToNot(HaveOccurred())
-			_, bndls, err := store.GetPendingTransfers(id)
+			_, bndls, err := st.GetPendingTransfers(id)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(len(bndls)).To(Equal(0))
 		})
