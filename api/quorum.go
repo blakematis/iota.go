@@ -289,7 +289,7 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	}
 
 	// check whether quorum is over threshold
-	percentage := mostVotes / float64(hc.nodesCount)
+	percentage := mostVotes / float64(hc.nodesCount-errorCount)
 	if percentage < hc.settings.QuorumThreshold {
 		return errors.Wrapf(ErrQuorumNotReached, "%0.2f of needed %0.2f reached", percentage, hc.settings.QuorumThreshold)
 	}
