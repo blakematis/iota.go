@@ -50,7 +50,7 @@ func (api *API) AttachToTangle(trunkTxHash Hash, branchTxHash Hash, mwm uint64, 
 
 	cmd := &AttachToTangleCommand{
 		TrunkTransaction: trunkTxHash, BranchTransaction: branchTxHash,
-		Command: AttachToTangleCmd, Trytes: trytes, MinWeightMagnitude: mwm,
+		Command: Command{AttachToTangleCmd}, Trytes: trytes, MinWeightMagnitude: mwm,
 	}
 	rsp := &AttachToTangleResponse{}
 	if err := api.provider.Send(cmd, rsp); err != nil {

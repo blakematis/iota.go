@@ -65,6 +65,14 @@ type QuorumHTTPClientSettings struct {
 
 	// The Proof-of-Work implementation function. Defaults to use the AttachToTangle IRI API call.
 	LocalProofOfWorkFunc pow.ProofOfWorkFunc
+
+	// A list of commands which will be executed in quorum even though they are not
+	// particularly made for such scenario. Good candidates are 'BroadcastTransactionsCmd'
+	// or 'StoreTransactionsCmd'
+	ForceQuorumSend map[IRICommand]struct{}
+
+	// Whether to execute BroadcastTransactions() on all nodes
+	SpreadBroadcastTransaction bool
 }
 
 // ProofOfWorkFunc returns the defined Proof-of-Work function.
@@ -171,13 +179,15 @@ type quorumresponse struct {
 
 // ignore
 func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
-	command, ok := cmd.(Commander)
+	comm, ok := cmd.(Commander)
 	if !ok {
 		panic("non Commander interface passed into Send()")
 	}
 
 	// execute non quorum command on the primary or random node
-	if _, ok := nonQuorumCommands[command.Cmd()]; ok {
+	command := comm.Cmd()
+	_, forced := hc.settings.ForceQuorumSend[command]
+	if _, ok := nonQuorumCommands[command]; ok && !forced {
 		// randomly pick up as no primary is defined
 		if hc.primary == nil {
 			provider := hc.randClients[rand.Int()%hc.nodesCount]

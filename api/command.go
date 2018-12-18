@@ -53,11 +53,11 @@ type AddNeighborsResponse struct {
 
 // AttachToTangleCommand represents the payload to the AttachToTangle API call.
 type AttachToTangleCommand struct {
-	Command            IRICommand `json:"command"`
-	TrunkTransaction   Hash       `json:"trunkTransaction"`
-	BranchTransaction  Hash       `json:"branchTransaction"`
-	MinWeightMagnitude uint64     `json:"minWeightMagnitude"`
-	Trytes             []Trytes   `json:"trytes"`
+	Command
+	TrunkTransaction   Hash     `json:"trunkTransaction"`
+	BranchTransaction  Hash     `json:"branchTransaction"`
+	MinWeightMagnitude uint64   `json:"minWeightMagnitude"`
+	Trytes             []Trytes `json:"trytes"`
 }
 
 // AttachToTangleResponse is the response from the AttachToTangle API call.
