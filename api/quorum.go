@@ -2,12 +2,13 @@ package api
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
+	"github.com/cespare/xxhash"
 	. "github.com/iotaledger/iota.go/consts"
 	"github.com/iotaledger/iota.go/pow"
 	"github.com/pkg/errors"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"sync"
@@ -43,7 +44,9 @@ type QuorumHTTPClientSettings struct {
 	// For certain commands for which a quorum doesn't make sense
 	// this node will be used. For example GetTransactionsToApprove
 	// would always fail when queried via a quorum.
-	PrimaryNode string
+	// If no PrimaryNode is set, then a node is randomly selected
+	// for executing calls for which no quorum can be done.
+	PrimaryNode *string
 	// The nodes to which the client connects to.
 	Nodes []string
 	// The underlying HTTPClient to use. Defaults to http.DefaultClient.
@@ -63,9 +66,11 @@ type QuorumHTTPClient interface {
 }
 
 type quorumhttpclient struct {
-	primary  Provider
-	client   HTTPClient
-	settings *QuorumHTTPClientSettings
+	primary     Provider
+	randClients []Provider
+	client      HTTPClient
+	nodesCount  int
+	settings    *QuorumHTTPClientSettings
 }
 
 // ignore
@@ -98,19 +103,38 @@ func (hc *quorumhttpclient) SetSettings(settings interface{}) error {
 		quSettings.QuorumThreshold = QuorumHigh
 	}
 
-	// initialize the primary client
-	httpSettings := HTTPClientSettings{
-		URI:                  quSettings.PrimaryNode,
-		Client:               quSettings.Client,
-		LocalProofOfWorkFunc: quSettings.LocalProofOfWorkFunc,
-	}
+	// set the primary node of our provider
+	if quSettings.PrimaryNode != nil {
+		// initialize the primary client
+		httpSettings := HTTPClientSettings{
+			URI:                  *quSettings.PrimaryNode,
+			Client:               quSettings.Client,
+			LocalProofOfWorkFunc: quSettings.LocalProofOfWorkFunc,
+		}
 
-	httpProvider, err := NewHTTPClient(httpSettings)
-	if err != nil {
-		return err
+		httpProvider, err := NewHTTPClient(httpSettings)
+		if err != nil {
+			return err
+		}
+		hc.primary = httpProvider
+	} else {
+		// instantiate a new provider for each single node
+		randClients := make([]Provider, len(quSettings.Nodes))
+		for i := range quSettings.Nodes {
+			httpSettings := HTTPClientSettings{
+				URI:                  quSettings.Nodes[i],
+				Client:               quSettings.Client,
+				LocalProofOfWorkFunc: quSettings.LocalProofOfWorkFunc,
+			}
+			httpProvider, err := NewHTTPClient(httpSettings)
+			if err != nil {
+				return err
+			}
+			randClients[i] = httpProvider
+		}
+		hc.randClients = randClients
 	}
-	hc.primary = httpProvider
-
+	hc.nodesCount = len(quSettings.Nodes)
 	hc.settings = &quSettings
 	return nil
 }
@@ -128,36 +152,42 @@ var nonQuorumCommands = map[IRICommand]struct{}{
 	"storeTransactions":        {},
 }
 
+type quorumresponse struct {
+	data   []byte
+	status int
+}
+
 // ignore
 func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
-	b, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
-
-	// execute non quorum command on the primary node
+	// execute non quorum command on the primary or random node
 	command, ok := cmd.(Commander)
 	if !ok {
 		panic("non Commander interface passed into Send()")
 	}
 	if _, ok := nonQuorumCommands[command.Cmd()]; ok {
+		// randomly pick up as no primary is defined
+		if hc.primary == nil {
+			provider := hc.randClients[rand.Int()%hc.nodesCount]
+			return provider.Send(cmd, out)
+		}
+		// use primary node
 		return hc.primary.Send(cmd, out)
 	}
 
-	type quresp struct {
-		data   []byte
-		status int
+	// serialize
+	b, err := json.Marshal(cmd)
+	if err != nil {
+		return err
 	}
 
-	// for any error which occured during sending the request
-	// of any node in the quorum
+	// for any error which occurred during sending the request in the quorum
 	var anyError error
 
-	// holds the count of same responses gathered
+	// holds the count of same responses
 	mu := sync.Mutex{}
-	votes := map[string]float64{}
-	responses := map[string]quresp{}
-	var totalVotes float64
+	votes := map[uint64]float64{}
+	responses := map[uint64]quorumresponse{}
+
 	wg := sync.WaitGroup{}
 	wg.Add(len(hc.settings.Nodes))
 
@@ -187,10 +217,6 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 				return
 			}
 
-			// the total count is only determined by votes
-			// which actually fulfilled the request
-			totalVotes++
-
 			// cut out duration parameter from response
 			var indexOfLastField int
 			for i := len(bs) - 1; i > 0; i-- {
@@ -204,42 +230,40 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 			bs = append(bs[:indexOfLastField], 125)
 
 			mu.Lock()
-			rawHash := sha256.Sum256(bs)
-			hash := string(rawHash[:])
+			hash := xxhash.Sum64(bs)
 			votes[hash]++
 			_, ok := responses[hash]
 			if !ok {
-				responses[hash] = quresp{data: bs, status: resp.StatusCode}
+				responses[hash] = quorumresponse{data: bs, status: resp.StatusCode}
 			}
 			mu.Unlock()
 		}(i)
 	}
 	wg.Wait()
 
-	// if any error occurred and a node couldn't
-	// get a response, we simply return the error
-	// instead of forming a quorum.
+	// if any error occurred and a node couldn't get a response,
+	// we simply return the error instead of forming a quorum.
 	// lib users should use good/alive nodes
 	if anyError != nil {
 		return err
 	}
 
-	var highestVotes float64
-	var highestKey string
+	var mostVotes float64
+	var selected uint64
 	for key, v := range votes {
-		if highestVotes < v {
-			highestVotes = v
-			highestKey = key
+		if mostVotes < v {
+			mostVotes = v
+			selected = key
 		}
 	}
 
 	// check whether quorum is over threshold
-	percentage := highestVotes / totalVotes
+	percentage := mostVotes / float64(hc.nodesCount)
 	if percentage < hc.settings.QuorumThreshold {
 		return errors.Wrapf(ErrQuorumNotReached, "%0.2f of needed %0.2f reached", percentage, hc.settings.QuorumThreshold)
 	}
 
-	quorumResult := responses[highestKey]
+	quorumResult := responses[selected]
 	resultData := quorumResult.data
 
 	if quorumResult.status != http.StatusOK {
