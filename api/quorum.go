@@ -159,11 +159,12 @@ type quorumresponse struct {
 
 // ignore
 func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
-	// execute non quorum command on the primary or random node
 	command, ok := cmd.(Commander)
 	if !ok {
 		panic("non Commander interface passed into Send()")
 	}
+
+	// execute non quorum command on the primary or random node
 	if _, ok := nonQuorumCommands[command.Cmd()]; ok {
 		// randomly pick up as no primary is defined
 		if hc.primary == nil {
@@ -226,11 +227,12 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 					break
 				}
 			}
+
 			// only grab part until last field and add closing bracket
 			bs = append(bs[:indexOfLastField], 125)
+			hash := xxhash.Sum64(bs)
 
 			mu.Lock()
-			hash := xxhash.Sum64(bs)
 			votes[hash]++
 			_, ok := responses[hash]
 			if !ok {
