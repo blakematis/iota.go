@@ -8,6 +8,7 @@ import (
 	"github.com/iotaledger/iota.go/pow"
 	"github.com/pkg/errors"
 	"io/ioutil"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -24,6 +25,7 @@ const (
 
 var ErrInvalidQuorumThreshold = errors.New("quorum threshold is set too low, must be >0.5")
 var ErrQuorumNotReached = errors.New("the quorum didn't reach a satisfactory result")
+var ErrExceededNoResponseTolerance = errors.New("exceeded no-response tolerance for quorum")
 
 const MinimumQuorumThreshold = 0.5
 
@@ -212,7 +214,7 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 			defer func() {
 				if anyError != nil {
 					errMu.Lock()
-					anyErrors = append(anyErrors, err)
+					anyErrors = append(anyErrors, anyError)
 					errMu.Unlock()
 				}
 			}()
@@ -264,19 +266,13 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	}
 	wg.Wait()
 
-	// if any error occurred and a node couldn't get a response,
-	// we simply return the error instead of forming a quorum.
-	// lib users should use good/alive nodes
+	// check how many nodes failed to give a response
+	// and then check whether we violated the no-response tolerance
 	errorCount := len(anyErrors)
-	if hc.settings.NoResponseTolerance == 0 {
-		if errorCount > 0 {
-			return anyErrors[0]
-		}
-	} else {
-		percOfFailedResp := float64(errorCount) / float64(hc.nodesCount)
-		if percOfFailedResp > hc.settings.NoResponseTolerance {
-			return anyErrors[0]
-		}
+	percOfFailedResp := float64(errorCount) / float64(hc.nodesCount)
+	if percOfFailedResp > hc.settings.NoResponseTolerance {
+		perc := math.Round(percOfFailedResp * 100)
+		return errors.Wrapf(ErrExceededNoResponseTolerance, "%d%% of nodes failed to give a response, first error '%v'", int(perc), anyErrors[0].Error())
 	}
 
 	var mostVotes float64
