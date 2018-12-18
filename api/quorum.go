@@ -41,16 +41,26 @@ type QuorumHTTPClientSettings struct {
 	// The threshold/majority percentage which must be reached in the responses
 	// to form a quorum.
 	QuorumThreshold float64
+
+	// Defines the max percentage of nodes which can fail to give a response
+	// when a quorum is built. For example, if 4 nodes are specified and
+	// a NoResponseTolerance of 0.25/25% is set, then one node of those 4
+	// is tolerated to fail to give a response and the quorum is built.
+	NoResponseTolerance float64
+
 	// For certain commands for which a quorum doesn't make sense
 	// this node will be used. For example GetTransactionsToApprove
 	// would always fail when queried via a quorum.
 	// If no PrimaryNode is set, then a node is randomly selected
 	// for executing calls for which no quorum can be done.
 	PrimaryNode *string
+
 	// The nodes to which the client connects to.
 	Nodes []string
+
 	// The underlying HTTPClient to use. Defaults to http.DefaultClient.
 	Client HTTPClient
+
 	// The Proof-of-Work implementation function. Defaults to use the AttachToTangle IRI API call.
 	LocalProofOfWorkFunc pow.ProofOfWorkFunc
 }
@@ -181,8 +191,9 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 		return err
 	}
 
-	// for any error which occurred during sending the request in the quorum
-	var anyError error
+	// for any errors which occurred during sending the request
+	errMu := sync.Mutex{}
+	anyErrors := []error{}
 
 	// holds the count of same responses
 	mu := sync.Mutex{}
@@ -196,6 +207,16 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	for i := range hc.settings.Nodes {
 		go func(i int) {
 			defer wg.Done()
+			// add the error which occurred during this call
+			var anyError error
+			defer func() {
+				if anyError != nil {
+					errMu.Lock()
+					anyErrors = append(anyErrors, err)
+					errMu.Unlock()
+				}
+			}()
+
 			rd := bytes.NewReader(b)
 			req, err := http.NewRequest("POST", hc.settings.Nodes[i], rd)
 			if err != nil {
@@ -246,8 +267,16 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	// if any error occurred and a node couldn't get a response,
 	// we simply return the error instead of forming a quorum.
 	// lib users should use good/alive nodes
-	if anyError != nil {
-		return err
+	errorCount := len(anyErrors)
+	if hc.settings.NoResponseTolerance == 0 {
+		if errorCount > 0 {
+			return anyErrors[0]
+		}
+	} else {
+		percOfFailedResp := float64(errorCount) / float64(hc.nodesCount)
+		if percOfFailedResp > hc.settings.NoResponseTolerance {
+			return anyErrors[0]
+		}
 	}
 
 	var mostVotes float64
