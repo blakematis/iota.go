@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-var ErrEmptyMultiSendSlice = errors.New("multi send slice must be of size > 0")
+var ErrEmptyRecipients = errors.New("recipients slice must be of size > 0")
 
 type ErrMarkDepositAddr struct {
 	actualError error
@@ -307,23 +307,10 @@ type Account struct {
 	listeners          map[AccountEvent][]EventChannel
 }
 
-// Send sends the specified amount to the recipient address.
-func (a *Account) Send(recipient Recipient) (bundle.Bundle, error) {
-	if !guards.IsTrytesOfExactLength(recipient.Address, consts.HashTrytesSize+consts.AddressChecksumTrytesSize) {
-		return nil, consts.ErrInvalidAddress
-	}
-	a.request <- actionrequest{Action: action_send, Request: recipient}
-	payload := <-a.sendBackChan
-	if payload.err != nil {
-		return nil, payload.err
-	}
-	return payload.item.(bundle.Bundle), nil
-}
-
-// Send sends the specified amounts to the recipient addresses.
-func (a *Account) SendMulti(recipients Recipients) (bundle.Bundle, error) {
+// Send sends the specified amounts to the given recipients.
+func (a *Account) Send(recipients ...Recipient) (bundle.Bundle, error) {
 	if recipients == nil || len(recipients) == 0 {
-		return nil, ErrEmptyMultiSendSlice
+		return nil, ErrEmptyRecipients
 	}
 	for _, target := range recipients {
 		if !guards.IsTrytesOfExactLength(target.Address, consts.HashTrytesSize+consts.AddressChecksumTrytesSize) {
