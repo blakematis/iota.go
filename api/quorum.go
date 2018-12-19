@@ -220,35 +220,36 @@ func reduceToLatestSolidSubtangleData(data []byte) ([]byte, error) {
 
 func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool {
 	// use defaults for non quorum results
-	if hc.settings.Defaults != nil {
-		switch x := cmd.(type) {
-		case WereAddressesSpentFromCommand:
-			if hc.settings.Defaults.WereAddressesSpentFrom != nil {
-				states := make([]bool, len(x.Addresses))
-				for i := range states {
-					states[i] = *hc.settings.Defaults.WereAddressesSpentFrom
-				}
-				out.(*WereAddressesSpentFromResponse).States = states
-				return true
+	if hc.settings.Defaults == nil {
+		return false
+	}
+	switch x := cmd.(type) {
+	case WereAddressesSpentFromCommand:
+		if hc.settings.Defaults.WereAddressesSpentFrom != nil {
+			states := make([]bool, len(x.Addresses))
+			for i := range states {
+				states[i] = *hc.settings.Defaults.WereAddressesSpentFrom
 			}
-		case GetInclusionStatesCommand:
-			if hc.settings.Defaults.GetInclusionStates != nil {
-				states := make([]bool, len(x.Transactions))
-				for i := range states {
-					states[i] = *hc.settings.Defaults.GetInclusionStates
-				}
-				out.(*GetInclusionStatesResponse).States = states
-				return true
+			out.(*WereAddressesSpentFromResponse).States = states
+			return true
+		}
+	case GetInclusionStatesCommand:
+		if hc.settings.Defaults.GetInclusionStates != nil {
+			states := make([]bool, len(x.Transactions))
+			for i := range states {
+				states[i] = *hc.settings.Defaults.GetInclusionStates
 			}
-		case GetBalancesCommand:
-			if hc.settings.Defaults.GetBalances != nil {
-				balances := make([]string, len(x.Addresses))
-				for i := range balances {
-					balances[i] = strconv.Itoa(int(*hc.settings.Defaults.GetBalances))
-				}
-				out.(*GetBalancesResponse).Balances = balances
-				return true
+			out.(*GetInclusionStatesResponse).States = states
+			return true
+		}
+	case GetBalancesCommand:
+		if hc.settings.Defaults.GetBalances != nil {
+			balances := make([]string, len(x.Addresses))
+			for i := range balances {
+				balances[i] = strconv.Itoa(int(*hc.settings.Defaults.GetBalances))
 			}
+			out.(*GetBalancesResponse).Balances = balances
+			return true
 		}
 	}
 	return false
