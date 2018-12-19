@@ -99,6 +99,7 @@ type GetBalancesCommand struct {
 	Command
 	Addresses Hashes `json:"addresses"`
 	Threshold uint64 `json:"threshold"`
+	Tips      []Hash   `json:"tips,omitempty"`
 }
 
 // GetBalancesResponse is the response from the GetBalances API call.
@@ -154,6 +155,18 @@ type GetNodeInfoResponse struct {
 	Time                               int64  `json:"time"`
 	Tips                               int64  `json:"tips"`
 	TransactionsToRequest              int64  `json:"transactionsToRequest"`
+}
+
+// GetLatestSolidSubtangleMilestoneCommand represents the payload to the GetNodeInfo API call.
+type GetLatestSolidSubtangleMilestoneCommand struct {
+	Command
+}
+
+// GetLatestSolidSubtangleMilestoneResponse is the response from the GetNodeInfo API call
+// but reduced to just the latest subtangle milestone data.
+type GetLatestSolidSubtangleMilestoneResponse struct {
+	LatestSolidSubtangleMilestone      Hash  `json:"latestSolidSubtangleMilestone"`
+	LatestSolidSubtangleMilestoneIndex int64 `json:"latestSolidSubtangleMilestoneIndex"`
 }
 
 // GetTipsCommand represents the payload to the GetTips API call.

@@ -159,7 +159,7 @@ func (api *API) FindTransactions(query FindTransactionsQuery) (Hashes, error) {
 }
 
 // GetBalances fetches confirmed balances of the given addresses at the latest solid milestone.
-func (api *API) GetBalances(addresses Hashes, threshold uint64) (*Balances, error) {
+func (api *API) GetBalances(addresses Hashes, threshold uint64, tips ...Hash) (*Balances, error) {
 	if err := Validate(ValidateHashes(addresses...)); err != nil {
 		return nil, err
 	}
@@ -173,7 +173,12 @@ func (api *API) GetBalances(addresses Hashes, threshold uint64) (*Balances, erro
 		return nil, err
 	}
 
-	cmd := &GetBalancesCommand{Addresses: cleanedAddrs, Threshold: threshold, Command: Command{GetBalancesCmd}}
+	cmd := &GetBalancesCommand{
+		Addresses: cleanedAddrs,
+		Threshold: threshold,
+		Command:   Command{GetBalancesCmd},
+		Tips:      tips,
+	}
 	rsp := &GetBalancesResponse{}
 	if err := api.provider.Send(cmd, rsp); err != nil {
 		return nil, err

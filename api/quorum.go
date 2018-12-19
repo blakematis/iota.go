@@ -177,6 +177,36 @@ type quorumresponse struct {
 	status int
 }
 
+var subMileTag = [30]byte{34, 108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101}
+var subMileIndexTag = [34]byte{108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101, 73, 110, 100, 101, 120}
+
+const comma = 44
+
+var ErrNoLatestSolidSubtangleInfo = errors.New("no latest solid subtangle info found")
+
+func reduceToLatestSolidSubtangleData(data []byte) ([]byte, error) {
+	indexOfSubtangleHashKey := bytes.Index(data, subMileTag[:])
+	if indexOfSubtangleHashKey == -1 {
+		return nil, ErrNoLatestSolidSubtangleInfo
+	}
+	indexOfSubtangleIndexKey := bytes.Index(data, subMileIndexTag[:])
+	if indexOfSubtangleIndexKey == -1 {
+		return nil, ErrNoLatestSolidSubtangleInfo
+	}
+	commaIndex := bytes.Index(data[indexOfSubtangleIndexKey:], []byte{comma})
+	if commaIndex == -1 {
+		return nil, ErrNoLatestSolidSubtangleInfo
+	}
+	if indexOfSubtangleIndexKey+commaIndex > len(data) {
+		return nil, ErrNoLatestSolidSubtangleInfo
+	}
+	part := data[indexOfSubtangleHashKey : indexOfSubtangleIndexKey+commaIndex]
+	// add opening/closing bracket
+	part = append([]byte{123}, part...)
+	part = append(part, 125)
+	return part, nil
+}
+
 // ignore
 func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	comm, ok := cmd.(Commander)
@@ -184,17 +214,22 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 		panic("non Commander interface passed into Send()")
 	}
 
-	// execute non quorum command on the primary or random node
-	command := comm.Cmd()
-	_, forced := hc.settings.ForceQuorumSend[command]
-	if _, ok := nonQuorumCommands[command]; ok && !forced {
-		// randomly pick up as no primary is defined
-		if hc.primary == nil {
-			provider := hc.randClients[rand.Int()%hc.nodesCount]
-			return provider.Send(cmd, out)
+	// check whether we are specifically asking for the latest solid subtangle
+	_, isLatestSolidSubtangleQuery := cmd.(*GetLatestSolidSubtangleMilestoneCommand)
+
+	if !isLatestSolidSubtangleQuery {
+		// execute non quorum command on the primary or random node
+		command := comm.Cmd()
+		_, forced := hc.settings.ForceQuorumSend[command]
+		if _, ok := nonQuorumCommands[command]; ok && !forced {
+			// randomly pick up as no primary is defined
+			if hc.primary == nil {
+				provider := hc.randClients[rand.Int()%hc.nodesCount]
+				return provider.Send(cmd, out)
+			}
+			// use primary node
+			return hc.primary.Send(cmd, out)
 		}
-		// use primary node
-		return hc.primary.Send(cmd, out)
 	}
 
 	// serialize
@@ -249,6 +284,17 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 			if err != nil {
 				anyError = err
 				return
+			}
+
+			// extract only latest solid subtangle data from get node info
+			// call to be able to form a quorum around that response
+			if isLatestSolidSubtangleQuery {
+				reducedData, err := reduceToLatestSolidSubtangleData(bs)
+				if err != nil {
+					anyError = err
+					return
+				}
+				bs = reducedData
 			}
 
 			// cut out duration parameter from response
