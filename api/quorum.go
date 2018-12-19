@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 )
 
@@ -38,11 +39,17 @@ func NewQuorumHTTPClient(settings interface{}) (Provider, error) {
 	return client, nil
 }
 
+type QuorumDefaults struct {
+	WereAddressesSpentFrom *bool
+	GetInclusionStates     *bool
+	GetBalances            *uint64
+}
+
 // QuorumHTTPClientSettings defines a set of settings for when constructing a new Http Provider.
 type QuorumHTTPClientSettings struct {
 	// The threshold/majority percentage which must be reached in the responses
 	// to form a quorum.
-	QuorumThreshold float64
+	Threshold float64
 
 	// Defines the max percentage of nodes which can fail to give a response
 	// when a quorum is built. For example, if 4 nodes are specified and
@@ -73,6 +80,10 @@ type QuorumHTTPClientSettings struct {
 
 	// Whether to execute BroadcastTransactions() on all nodes
 	SpreadBroadcastTransaction bool
+
+	// Default values which are returned when no quorum could be reached
+	// for certain types of calls.
+	Defaults *QuorumDefaults
 }
 
 // ProofOfWorkFunc returns the defined Proof-of-Work function.
@@ -115,12 +126,12 @@ func (hc *quorumhttpclient) SetSettings(settings interface{}) error {
 	}
 
 	// verify that the quorum threshold makes sense
-	if quSettings.QuorumThreshold != 0 {
-		if quSettings.QuorumThreshold <= MinimumQuorumThreshold {
+	if quSettings.Threshold != 0 {
+		if quSettings.Threshold <= MinimumQuorumThreshold {
 			return ErrInvalidQuorumThreshold
 		}
 	} else {
-		quSettings.QuorumThreshold = QuorumHigh
+		quSettings.Threshold = QuorumHigh
 	}
 
 	// set the primary node of our provider
@@ -205,6 +216,42 @@ func reduceToLatestSolidSubtangleData(data []byte) ([]byte, error) {
 	part = append([]byte{123}, part...)
 	part = append(part, 125)
 	return part, nil
+}
+
+func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool {
+	// use defaults for non quorum results
+	if hc.settings.Defaults != nil {
+		switch x := cmd.(type) {
+		case WereAddressesSpentFromCommand:
+			if hc.settings.Defaults.WereAddressesSpentFrom != nil {
+				states := make([]bool, len(x.Addresses))
+				for i := range states {
+					states[i] = *hc.settings.Defaults.WereAddressesSpentFrom
+				}
+				out.(*WereAddressesSpentFromResponse).States = states
+				return true
+			}
+		case GetInclusionStatesCommand:
+			if hc.settings.Defaults.GetInclusionStates != nil {
+				states := make([]bool, len(x.Transactions))
+				for i := range states {
+					states[i] = *hc.settings.Defaults.GetInclusionStates
+				}
+				out.(*GetInclusionStatesResponse).States = states
+				return true
+			}
+		case GetBalancesCommand:
+			if hc.settings.Defaults.GetBalances != nil {
+				balances := make([]string, len(x.Addresses))
+				for i := range balances {
+					balances[i] = strconv.Itoa(int(*hc.settings.Defaults.GetBalances))
+				}
+				out.(*GetBalancesResponse).Balances = balances
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ignore
@@ -342,8 +389,14 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 
 	// check whether quorum is over threshold
 	percentage := mostVotes / float64(hc.nodesCount-errorCount)
-	if percentage < hc.settings.QuorumThreshold {
-		return errors.Wrapf(ErrQuorumNotReached, "%0.2f of needed %0.2f reached", percentage, hc.settings.QuorumThreshold)
+	if percentage < hc.settings.Threshold {
+		// automatically inject the default value set by the library user
+		// in case no quorum was reached. If no defaults are set, then
+		// the default error is returned indicating that no quorum was reached
+		if hc.injectDefault(cmd, out) {
+			return nil
+		}
+		return errors.Wrapf(ErrQuorumNotReached, "%0.2f of needed %0.2f reached", percentage, hc.settings.Threshold)
 	}
 
 	quorumResult := responses[selected]
