@@ -348,7 +348,7 @@ func (api *API) WereAddressesSpentFrom(addresses ...Hash) ([]bool, error) {
 		return nil, err
 	}
 
-	cmd := &WereAddressesSpentFromCommand{Addresses: cleanedAddrs, Command: WereAddressesSpentFromCmd}
+	cmd := &WereAddressesSpentFromCommand{Addresses: cleanedAddrs, Command: Command{WereAddressesSpentFromCmd}}
 	rsp := &WereAddressesSpentFromResponse{}
 	if err := api.provider.Send(cmd, rsp); err != nil {
 		return nil, err

@@ -99,7 +99,7 @@ type GetBalancesCommand struct {
 	Command
 	Addresses Hashes `json:"addresses"`
 	Threshold uint64 `json:"threshold"`
-	Tips      []Hash   `json:"tips,omitempty"`
+	Tips      []Hash `json:"tips,omitempty"`
 }
 
 // GetBalancesResponse is the response from the GetBalances API call.
@@ -228,8 +228,8 @@ type StoreTransactionsCommand struct {
 
 // WereAddressesSpentFromCommand represents the payload to the WereAddressesSpentFrom API call.
 type WereAddressesSpentFromCommand struct {
-	Command   IRICommand `json:"command"`
-	Addresses Hashes     `json:"addresses"`
+	Command
+	Addresses Hashes `json:"addresses"`
 }
 
 // WereAddressesSpentFromResponse is the response from the WereAddressesSpentFrom API call.

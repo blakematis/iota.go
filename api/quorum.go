@@ -16,8 +16,10 @@ import (
 	"sync"
 )
 
+// QuorumLevel defines the percentage needed for a quorum.
 type QuorumLevel float64
 
+// package quorum levels
 const (
 	QuorumHigh   = 0.95
 	QuorumMedium = 0.75
@@ -27,7 +29,11 @@ const (
 var ErrInvalidQuorumThreshold = errors.New("quorum threshold is set too low, must be >0.5")
 var ErrQuorumNotReached = errors.New("the quorum didn't reach a satisfactory result")
 var ErrExceededNoResponseTolerance = errors.New("exceeded no-response tolerance for quorum")
+var ErrNotEnoughNodesForQuorum = errors.New("at least 2 nodes must be defined for quorum")
+var ErrNoLatestSolidSubtangleInfo = errors.New("no latest solid subtangle info found")
 
+// MinimumQuorumThreshold is the minimum threshold the quorum settings
+// must have.
 const MinimumQuorumThreshold = 0.5
 
 // NewQuorumHTTPClient creates a new quorum based Http Provider.
@@ -39,6 +45,7 @@ func NewQuorumHTTPClient(settings interface{}) (Provider, error) {
 	return client, nil
 }
 
+// QuorumDefaults defines optional default values when a quorum couldn't be reached.
 type QuorumDefaults struct {
 	WereAddressesSpentFrom *bool
 	GetInclusionStates     *bool
@@ -48,12 +55,13 @@ type QuorumDefaults struct {
 // QuorumHTTPClientSettings defines a set of settings for when constructing a new Http Provider.
 type QuorumHTTPClientSettings struct {
 	// The threshold/majority percentage which must be reached in the responses
-	// to form a quorum.
+	// to form a quorum. Define the threshold as 0<x<1, i.e. 0.8 => 80%.
+	// A threshold of 1 would mean that all nodes must give the same response.
 	Threshold float64
 
 	// Defines the max percentage of nodes which can fail to give a response
 	// when a quorum is built. For example, if 4 nodes are specified and
-	// a NoResponseTolerance of 0.25/25% is set, then one node of those 4
+	// a NoResponseTolerance of 0.25/25% is set, then 1 node of those 4
 	// is tolerated to fail to give a response and the quorum is built.
 	NoResponseTolerance float64
 
@@ -109,6 +117,10 @@ func (hc *quorumhttpclient) SetSettings(settings interface{}) error {
 	quSettings, ok := settings.(QuorumHTTPClientSettings)
 	if !ok {
 		return errors.Wrapf(ErrInvalidSettingsType, "expected %T", QuorumHTTPClientSettings{})
+	}
+
+	if len(quSettings.Nodes) < 2 {
+		return ErrNotEnoughNodesForQuorum
 	}
 
 	// verify the urls of all given nodes
@@ -193,8 +205,6 @@ var subMileIndexTag = [34]byte{108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 1
 
 const comma = 44
 
-var ErrNoLatestSolidSubtangleInfo = errors.New("no latest solid subtangle info found")
-
 func reduceToLatestSolidSubtangleData(data []byte) ([]byte, error) {
 	indexOfSubtangleHashKey := bytes.Index(data, subMileTag[:])
 	if indexOfSubtangleHashKey == -1 {
@@ -218,13 +228,14 @@ func reduceToLatestSolidSubtangleData(data []byte) ([]byte, error) {
 	return part, nil
 }
 
+// injects the optional default set data into the response
 func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool {
 	// use defaults for non quorum results
 	if hc.settings.Defaults == nil {
 		return false
 	}
 	switch x := cmd.(type) {
-	case WereAddressesSpentFromCommand:
+	case *WereAddressesSpentFromCommand:
 		if hc.settings.Defaults.WereAddressesSpentFrom != nil {
 			states := make([]bool, len(x.Addresses))
 			for i := range states {
@@ -233,7 +244,7 @@ func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool
 			out.(*WereAddressesSpentFromResponse).States = states
 			return true
 		}
-	case GetInclusionStatesCommand:
+	case *GetInclusionStatesCommand:
 		if hc.settings.Defaults.GetInclusionStates != nil {
 			states := make([]bool, len(x.Transactions))
 			for i := range states {
@@ -242,7 +253,7 @@ func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool
 			out.(*GetInclusionStatesResponse).States = states
 			return true
 		}
-	case GetBalancesCommand:
+	case *GetBalancesCommand:
 		if hc.settings.Defaults.GetBalances != nil {
 			balances := make([]string, len(x.Addresses))
 			for i := range balances {
@@ -253,6 +264,21 @@ func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool
 		}
 	}
 	return false
+}
+
+const closingCurlyBrace = 125
+
+var durationKey = [11]byte{34, 100, 117, 114, 97, 116, 105, 111, 110, 34, 58}
+
+// removes the duration value from the response
+// as multiple nodes will always return a different one
+func removeDurationField(data []byte) []byte {
+	indexOfDurationField := bytes.Index(data, durationKey[:])
+	if indexOfDurationField == -1 {
+		return data
+	}
+	curlyBraceIndex := bytes.Index(data[indexOfDurationField:], []byte{closingCurlyBrace})
+	return append(data[:indexOfDurationField-1], data[indexOfDurationField+curlyBraceIndex:]...)
 }
 
 // ignore
@@ -345,20 +371,11 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 				bs = reducedData
 			}
 
-			// cut out duration parameter from response
-			var indexOfLastField int
-			for i := len(bs) - 1; i > 0; i-- {
-				// comma
-				if bs[i] == 44 {
-					indexOfLastField = i
-					break
-				}
-			}
+			// remove the duration field from the response
+			// as multiple nodes will always give a different answer
+			bs = removeDurationField(bs)
 
-			// only grab part until last field and add closing bracket
-			bs = append(bs[:indexOfLastField], 125)
 			hash := xxhash.Sum64(bs)
-
 			mu.Lock()
 			votes[hash]++
 			_, ok := responses[hash]
