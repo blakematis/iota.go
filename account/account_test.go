@@ -112,7 +112,7 @@ var _ = Describe("Account", func() {
 						Post("/").
 						MatchType("json").
 						JSON(GetBalancesCommand{
-							Command:   GetBalancesCmd,
+							Command:   Command{GetBalancesCmd},
 							Addresses: trinary.Hashes{addrsWC[i]},
 							Threshold: 100,
 						}).
@@ -171,7 +171,7 @@ var _ = Describe("Account", func() {
 					Persist().
 					Post("/").
 					MatchType("json").
-					JSON(GetBalancesCommand{Command: GetBalancesCmd, Addresses: addrsWC[:1], Threshold: 100}).
+					JSON(GetBalancesCommand{Command: Command{GetBalancesCmd}, Addresses: addrsWC[:1], Threshold: 100}).
 					Reply(200).
 					JSON(GetBalancesResponse{
 						Duration:       100,
@@ -185,7 +185,7 @@ var _ = Describe("Account", func() {
 					Persist().
 					Post("/").
 					MatchType("json").
-					JSON(FindTransactionsCommand{Command: FindTransactionsCmd, FindTransactionsQuery: FindTransactionsQuery{
+					JSON(FindTransactionsCommand{Command: Command{FindTransactionsCmd}, FindTransactionsQuery: FindTransactionsQuery{
 						Addresses: addrsWC[:1],
 					}}).
 					Reply(200).
@@ -195,7 +195,7 @@ var _ = Describe("Account", func() {
 					Post("/").
 					MatchType("json").
 					JSON(GetTransactionsToApproveCommand{
-						Command: GetTransactionsToApproveCmd, Depth: 3,
+						Command: Command{GetTransactionsToApproveCmd}, Depth: 3,
 					}).
 					Reply(200).
 					JSON(GetTransactionsToApproveResponse{
@@ -210,7 +210,7 @@ var _ = Describe("Account", func() {
 					Post("/").
 					MatchType("json").
 					JSON(AttachToTangleCommand{
-						Command: AttachToTangleCmd, TrunkTransaction: trunkTx, BranchTransaction: branchTx,
+						Command: Command{AttachToTangleCmd}, TrunkTransaction: trunkTx, BranchTransaction: branchTx,
 						MinWeightMagnitude: 9, Trytes: expectedPreparedTrytes,
 					}).
 					Reply(200).
@@ -219,13 +219,13 @@ var _ = Describe("Account", func() {
 				gock.New(DefaultLocalIRIURI).
 					Post("/").
 					MatchType("json").
-					JSON(StoreTransactionsCommand{Command: StoreTransactionsCmd, Trytes: powedPreparedTrytes}).
+					JSON(StoreTransactionsCommand{Command: Command{StoreTransactionsCmd}, Trytes: powedPreparedTrytes}).
 					Reply(200)
 
 				gock.New(DefaultLocalIRIURI).
 					Post("/").
 					MatchType("json").
-					JSON(BroadcastTransactionsCommand{Command: BroadcastTransactionsCmd, Trytes: powedPreparedTrytes}).
+					JSON(BroadcastTransactionsCommand{Command: Command{BroadcastTransactionsCmd}, Trytes: powedPreparedTrytes}).
 					Reply(200)
 
 				// hypothetical deposit address given to someone and got some funds
@@ -261,7 +261,7 @@ var _ = Describe("Account", func() {
 				gock.New(DefaultLocalIRIURI).
 					Post("/").
 					MatchType("json").
-					JSON(GetNodeInfoCommand{Command: GetNodeInfoCmd}).
+					JSON(GetNodeInfoCommand{Command: Command{GetNodeInfoCmd}}).
 					Reply(200).
 					JSON(GetNodeInfoResponse{
 						AppName:                            "IRI",
@@ -286,7 +286,7 @@ var _ = Describe("Account", func() {
 					Post("/").
 					MatchType("json").
 					JSON(GetInclusionStatesCommand{
-						Command:      GetInclusionStatesCmd,
+						Command:      Command{GetInclusionStatesCmd},
 						Transactions: trinary.Hashes{finalTxs[0].Hash},
 						Tips:         trinary.Hashes{milestoneHash},
 					}).
@@ -297,7 +297,7 @@ var _ = Describe("Account", func() {
 					gock.New(DefaultLocalIRIURI).
 						Post("/").
 						MatchType("json").
-						JSON(GetTrytesCommand{Command: GetTrytesCmd, Hashes: trinary.Hashes{finalTxs[i].Hash}}).
+						JSON(GetTrytesCommand{Command: Command{GetTrytesCmd}, Hashes: trinary.Hashes{finalTxs[i].Hash}}).
 						Reply(200).
 						JSON(AttachToTangleResponse{Trytes: []trinary.Trytes{powedPreparedTrytes[i]}})
 				}
