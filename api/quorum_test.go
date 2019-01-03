@@ -30,7 +30,7 @@ var _ = Describe("Quorum", func() {
 				Threshold: 1,
 			})
 			defer gock.Flush()
-			// every node give a different answer
+			// every node gives a different answer
 			for i, node := range nodes {
 				gock.New(node).
 					Post("/").
@@ -69,7 +69,7 @@ var _ = Describe("Quorum", func() {
 			Expect(errors.Cause(err)).To(Equal(ErrQuorumNotReached))
 		})
 
-		It("returns set default value when quorum couldn't be reached", func() {
+		It("returns the optional defined value when quorum couldn't be reached", func() {
 			defVal := true
 			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
 				Nodes:     nodes[:2],
@@ -130,7 +130,7 @@ var _ = Describe("Quorum", func() {
 				Threshold: 0.75,
 			})
 			defer gock.Flush()
-			// one node gives anothe answer
+			// one node gives another answer
 			for i, node := range nodes {
 				var resVal int
 				if i == len(nodes)-1 {
@@ -147,6 +147,31 @@ var _ = Describe("Quorum", func() {
 			err := provider.Send(&fakereqres{Val: 0}, res)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(res.Val).To(Equal(0))
+		})
+
+		It("returns the error response when the quorum forms it", func() {
+			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
+				Nodes:     nodes,
+				Threshold: 1,
+			})
+			type errorresp struct {
+				Error string `json:"error"`
+			}
+			const errorMsg = "Command [getBanana] is unknown"
+			const resVal = 1
+			defer gock.Flush()
+			for _, node := range nodes {
+				gock.New(node).
+					Post("/").
+					MatchType("json").
+					JSON(fakereqres{Val: 0}).
+					Reply(400).
+					JSON(errorresp{errorMsg})
+			}
+			res := &fakereqres{}
+			err := provider.Send(&fakereqres{Val: 0}, res)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(Equal(errorMsg))
 		})
 
 	})

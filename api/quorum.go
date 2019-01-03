@@ -26,11 +26,14 @@ const (
 	QuorumLow    = 0.60
 )
 
-var ErrInvalidQuorumThreshold = errors.New("quorum threshold is set too low, must be >0.5")
-var ErrQuorumNotReached = errors.New("the quorum didn't reach a satisfactory result")
-var ErrExceededNoResponseTolerance = errors.New("exceeded no-response tolerance for quorum")
-var ErrNotEnoughNodesForQuorum = errors.New("at least 2 nodes must be defined for quorum")
-var ErrNoLatestSolidSubtangleInfo = errors.New("no latest solid subtangle info found")
+// errors produced by the quorum http provider
+var (
+	ErrInvalidQuorumThreshold      = errors.New("quorum threshold is set too low, must be >0.5")
+	ErrQuorumNotReached            = errors.New("the quorum didn't reach a satisfactory result")
+	ErrExceededNoResponseTolerance = errors.New("exceeded no-response tolerance for quorum")
+	ErrNotEnoughNodesForQuorum     = errors.New("at least 2 nodes must be defined for quorum")
+	ErrNoLatestSolidSubtangleInfo  = errors.New("no latest solid subtangle info found")
+)
 
 // MinimumQuorumThreshold is the minimum threshold the quorum settings
 // must have.
@@ -68,8 +71,10 @@ type QuorumHTTPClientSettings struct {
 	// For certain commands for which a quorum doesn't make sense
 	// this node will be used. For example GetTransactionsToApprove
 	// would always fail when queried via a quorum.
-	// If no PrimaryNode is set, then a node is randomly selected
+	// If no PrimaryNode is set, then a node is randomly selected from Nodes
 	// for executing calls for which no quorum can be done.
+	// The primary node is not used for forming the quorum and must be
+	// explicitly set in the Nodes field a second time.
 	PrimaryNode *string
 
 	// The nodes to which the client connects to.
@@ -203,7 +208,7 @@ type quorumresponse struct {
 var subMileTag = [30]byte{34, 108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101}
 var subMileIndexTag = [34]byte{108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101, 73, 110, 100, 101, 120}
 
-const comma = 44
+const commaAsciiVal = 44
 
 func reduceToLatestSolidSubtangleData(data []byte) ([]byte, error) {
 	indexOfSubtangleHashKey := bytes.Index(data, subMileTag[:])
@@ -214,7 +219,7 @@ func reduceToLatestSolidSubtangleData(data []byte) ([]byte, error) {
 	if indexOfSubtangleIndexKey == -1 {
 		return nil, ErrNoLatestSolidSubtangleInfo
 	}
-	commaIndex := bytes.Index(data[indexOfSubtangleIndexKey:], []byte{comma})
+	commaIndex := bytes.Index(data[indexOfSubtangleIndexKey:], []byte{commaAsciiVal})
 	if commaIndex == -1 {
 		return nil, ErrNoLatestSolidSubtangleInfo
 	}
@@ -266,7 +271,7 @@ func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool
 	return false
 }
 
-const closingCurlyBrace = 125
+const closingCurlyBraceAscii = 125
 
 var durationKey = [11]byte{34, 100, 117, 114, 97, 116, 105, 111, 110, 34, 58}
 
@@ -277,7 +282,7 @@ func removeDurationField(data []byte) []byte {
 	if indexOfDurationField == -1 {
 		return data
 	}
-	curlyBraceIndex := bytes.Index(data[indexOfDurationField:], []byte{closingCurlyBrace})
+	curlyBraceIndex := bytes.Index(data[indexOfDurationField:], []byte{closingCurlyBraceAscii})
 	return append(data[:indexOfDurationField-1], data[indexOfDurationField+curlyBraceIndex:]...)
 }
 
