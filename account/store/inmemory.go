@@ -163,7 +163,7 @@ func (mem *InMemoryStore) GetPendingTransfers(id string) (trinary.Hashes, bundle
 	tailTxs := make(trinary.Hashes, len(state.PendingTransfers))
 	i := 0
 	for tailTx, pendingTransfer := range state.PendingTransfers {
-		bndl, err := EssenceToBundle(pendingTransfer)
+		bndl, err := PendingTransferToBundle(pendingTransfer)
 		if err != nil {
 			return nil, nil, err
 		}

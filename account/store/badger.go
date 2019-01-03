@@ -198,7 +198,7 @@ func (b *BadgerStore) GetPendingTransfers(id string) (Hashes, bundle.Bundles, er
 		tailTxs = make(Hashes, len(state.PendingTransfers))
 		i := 0
 		for tailTx, pendingTransfer := range state.PendingTransfers {
-			bndl, err := EssenceToBundle(pendingTransfer)
+			bndl, err := PendingTransferToBundle(pendingTransfer)
 			if err != nil {
 				return err
 			}
