@@ -3,6 +3,9 @@ package deposit
 import (
 	"fmt"
 	. "github.com/iotaledger/iota.go/trinary"
+	"github.com/pkg/errors"
+	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -21,6 +24,31 @@ const (
 
 func (dc *Conditions) URL() string {
 	return fmt.Sprintf("iota://%s/?t=%d&m=%v&am=%d", dc.Address, dc.TimeoutOn.Unix(), dc.MultiUse, dc.ExpectedAmount)
+}
+
+func ParseMagnetLink(s string) (*Conditions, error) {
+	link, err := url.Parse(s)
+	if err != nil {
+		return nil, err
+	}
+	query := link.Query()
+	cond := &Conditions{
+		Address: link.Host,
+	}
+	expiresSeconds, err := strconv.ParseInt(query.Get(ConditionExpires), 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid expire timestamp")
+	}
+	expire := time.Unix(expiresSeconds, 0)
+	cond.TimeoutOn = &expire
+	cond.MultiUse = query.Get(ConditionMultiUse) == "true"
+	expectedAmount, err := strconv.ParseInt(query.Get(ConditionAmount), 10, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid expected amount")
+	}
+	expectedAmountUint := uint64(expectedAmount)
+	cond.ExpectedAmount = &expectedAmountUint
+	return cond, nil
 }
 
 // Request defines a new deposit request against the account.

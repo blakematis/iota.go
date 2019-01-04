@@ -19,13 +19,13 @@ import (
 )
 
 type Clock interface {
-	Now() time.Time
+	Now() (time.Time, error)
 }
 
-type realclock struct{}
+type systemclock struct{}
 
-func (rc *realclock) Now() time.Time {
-	return time.Now()
+func (rc *systemclock) Now() (time.Time, error) {
+	return time.Now().UTC(), nil
 }
 
 type action byte
@@ -101,7 +101,7 @@ func defaultAccountOpts(opts ...*AccountsOpts) *AccountsOpts {
 	if len(opts) == 0 {
 		return &AccountsOpts{
 			MWM: 14, Depth: 3, SecurityLevel: consts.SecurityLevelMedium,
-			TransferPollInterval: 10, PromoteReattachInterval: 10, Clock: &realclock{},
+			TransferPollInterval: 10, PromoteReattachInterval: 10, Clock: &systemclock{},
 			ReceiveEventFilter:     NewPerTailReceiveEventFilter(),
 			InputSelectionStrategy: DefaultInputSelection,
 		}
@@ -121,7 +121,7 @@ func defaultAccountOpts(opts ...*AccountsOpts) *AccountsOpts {
 	opt.TransferPollInterval = defaultValue(opt.TransferPollInterval, 20)
 	opt.PromoteReattachInterval = defaultValue(opt.TransferPollInterval, 20)
 	if opt.Clock == nil {
-		opt.Clock = &realclock{}
+		opt.Clock = &systemclock{}
 	}
 	if opt.ReceiveEventFilter == nil {
 		opt.ReceiveEventFilter = NewPerTailReceiveEventFilter()
@@ -231,7 +231,11 @@ func (a *Account) NewDepositRequest(req *deposit.Request) (*deposit.Conditions, 
 	if req.TimeoutOn == nil {
 		return nil, ErrTimeoutNotSpecified
 	}
-	if req.TimeoutOn.Add(-(time.Duration(2) * time.Minute)).Before(time.Now()) {
+	currentTime, err := a.clock.Now()
+	if err != nil {
+		return nil, err
+	}
+	if req.TimeoutOn.Add(-(time.Duration(2) * time.Minute)).Before(currentTime) {
 		return nil, ErrTimeoutTooLow
 	}
 	a.request <- actionrequest{Action: actionNewDepositAddress, Request: req}
@@ -469,14 +473,13 @@ func (a *Account) send(targets Recipients) error {
 	var inputs []api.Input
 	var remainderAddress *Hash
 	var err error
-
 	transferSum := targets.Sum()
 	forRemoval := []uint64{}
 	if transferSum > 0 {
 		// gather the total sum, inputs, addresses to remove from the store
 		sum, ins, rem, err := a.inputSelectionStrat(a, transferSum, false)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "failed to perform input selection in send op.")
 		}
 
 		inputs = ins
@@ -494,7 +497,12 @@ func (a *Account) send(targets Recipients) error {
 
 	transfers := targets.AsTransfers()
 
-	ts := uint64(a.clock.Now().UnixNano() / int64(time.Second))
+	currentTime, err := a.clock.Now()
+	if err != nil {
+		return errors.Wrap(err, "unable to get current time in send op.")
+	}
+
+	ts := uint64(currentTime.UnixNano() / int64(time.Second))
 	opts := api.PrepareTransfersOptions{
 		Inputs:           inputs,
 		RemainderAddress: remainderAddress,
@@ -504,17 +512,17 @@ func (a *Account) send(targets Recipients) error {
 
 	bundleTrytes, err := a.api.PrepareTransfers(a.seed, transfers, opts)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "unable to prepare transfers in send op.")
 	}
 
 	tips, err := a.api.GetTransactionsToApprove(a.depth)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "unable to GTTA in send op.")
 	}
 
 	powedTrytes, err := a.api.AttachToTangle(tips.TrunkTransaction, tips.BranchTransaction, a.mwm, bundleTrytes)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "performing PoW in send op. failed")
 	}
 
 	tailTx, err := transaction.AsTransactionObject(powedTrytes[0])
@@ -524,18 +532,19 @@ func (a *Account) send(targets Recipients) error {
 
 	// add the new transfer to the db
 	if err := a.storage.AddPendingTransfer(a.id, tailTx.Hash, powedTrytes, forRemoval...); err != nil {
-		return err
+		return errors.Wrap(err, "unable to store pending transfer in send op.")
 	}
 
 	bndlTrytes, err := a.api.StoreAndBroadcast(powedTrytes)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "unable to store/broadcast bundle in send op.")
 	}
 
 	bndl, err := transaction.AsTransactionObjects(bndlTrytes, nil)
 	if err != nil {
 		return err
 	}
+
 	a.emitEvent(bndl, EventSendingTransfer)
 	a.sendBackChan <- actionresponse{item: bndl}
 	return nil
@@ -545,7 +554,7 @@ func (a *Account) send(targets Recipients) error {
 func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) (uint64, []api.Input, []uint64, error) {
 	state, err := a.storage.LoadAccount(a.id)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, errors.Wrap(err, "unable to load account state for input selection")
 	}
 
 	// no deposit requests, therefore 0 balance
@@ -560,13 +569,31 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 	// get the current solid subtangle milestone for doing each getBalance query with the same milestone
 	solidSubtangleMilestone, err := a.api.GetLatestSolidSubtangleMilestone()
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, errors.Wrap(err, "unable to fetch latest solid subtangle milestone for input selection")
 	}
 	subtangleHash := solidSubtangleMilestone.LatestSolidSubtangleMilestone
 
-	now := time.Now()
-	selected := []api.Input{}
-	selectedTimedout := []uint64{}
+	now, err := a.clock.Now()
+	if err != nil {
+		return 0, nil, nil, errors.Wrap(err, "unable to get time for doing input selection")
+	}
+
+	type selection struct {
+		keyIndex       uint64
+		expectedAmount *uint64
+	}
+
+	// addresses to query on the first pass
+	primaryAddrs := Hashes{}
+
+	// selected addresses
+	selections := []selection{}
+
+	// addresses which are timed out
+	// (generation of address is deferred up until it's needed)
+	timedOutAddrs := []uint64{}
+
+	// addresses/indices to remove from the store
 	toRemove := []uint64{}
 
 	addForRemove := func(keyIndex uint64) {
@@ -576,39 +603,22 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 		toRemove = append(toRemove, keyIndex)
 	}
 
-	selectIndex := func(keyIndex uint64, expectedAmount uint64) error {
-		addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
-		resp, err := a.api.GetBalances(Hashes{addr}, 100, subtangleHash)
-		if err != nil {
-			return err
-		}
-		balance := resp.Balances[0]
-		if balance < expectedAmount {
-			return nil
-		}
-		selected = append(selected, api.Input{
-			KeyIndex: keyIndex,
-			Address:  addr,
-			Security: a.secLvl,
-			Balance:  balance,
-		})
-		return nil
-	}
-
+	// iterate over all allocated deposit addresses
 	for keyIndex, req := range state.DepositRequests {
 		// remainder address
 		if req.TimeoutOn == nil {
 			if req.ExpectedAmount == nil {
 				panic("remainder address in system without 'expected amount'")
 			}
-			if err := selectIndex(keyIndex, *req.ExpectedAmount); err != nil {
-				return 0, nil, nil, err
-			}
+			addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
+			primaryAddrs = append(primaryAddrs, addr)
+			selections = append(selections, selection{keyIndex, req.ExpectedAmount})
+			continue
 		}
 
 		// timed out
 		if now.After(*req.TimeoutOn) {
-			selectedTimedout = append(selectedTimedout, keyIndex)
+			timedOutAddrs = append(timedOutAddrs, keyIndex)
 			continue
 		}
 
@@ -619,31 +629,22 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 			if req.ExpectedAmount == nil {
 				continue
 			}
-			if err := selectIndex(keyIndex, *req.ExpectedAmount); err != nil {
-				return 0, nil, nil, err
-			}
+			addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
+			primaryAddrs = append(primaryAddrs, addr)
+			selections = append(selections, selection{keyIndex, req.ExpectedAmount})
 			continue
 		}
 
 		// single
-		if req.ExpectedAmount == nil {
-			addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
-			resp, err := a.api.GetBalances(Hashes{addr}, 100, subtangleHash)
-			if err != nil {
-				return 0, nil, nil, err
-			}
-			selected = append(selected, api.Input{
-				Security: a.secLvl,
-				Address:  addr,
-				KeyIndex: keyIndex,
-				Balance:  resp.Balances[0],
-			})
-			continue
-		}
+		addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
+		primaryAddrs = append(primaryAddrs, addr)
+		selections = append(selections, selection{keyIndex, req.ExpectedAmount})
+	}
 
-		if err := selectIndex(keyIndex, *req.ExpectedAmount); err != nil {
-			return 0, nil, nil, err
-		}
+	// get the balance of all selected addresses in one go
+	balances, err := a.api.GetBalances(primaryAddrs, 100, subtangleHash)
+	if err != nil {
+		return 0, nil, nil, errors.Wrap(err, "unable to fetch balances of primary selected addresses for input selection")
 	}
 
 	inputs := []api.Input{}
@@ -653,69 +654,49 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 		}
 		inputs = append(inputs, *input)
 	}
+
+	// add addresses as inputs which fulfill their criteria
 	var sum uint64
-	for i := range selected {
-		input := &selected[i]
-		sum += input.Balance
-		addAsInput(input)
-		addForRemove(input.KeyIndex)
+	for i := range selections {
+		s := &selections[i]
+		// skip addresses which have an expected amount which isn't reached however
+		if s.expectedAmount != nil && balances.Balances[i] < *s.expectedAmount {
+			continue
+		}
+		sum += balances.Balances[i]
+
+		// add the address as an input
+		if balances.Balances[i] > 0 {
+			addAsInput(&api.Input{
+				Address:  primaryAddrs[i],
+				KeyIndex: s.keyIndex,
+				Balance:  balances.Balances[i],
+				Security: a.secLvl,
+			})
+		}
+
+		// mark the address for removal as it should be freed from the store
+		addForRemove(s.keyIndex)
 		if sum > transferValue && !balanceCheck {
 			break
 		}
 	}
 
+	// if we didn't fulfill the transfer value,
+	// lets use the timed out addresses too to try to fulfill the transfer
 	if sum < transferValue || balanceCheck {
-		for _, keyIndex := range selectedTimedout {
+		for _, keyIndex := range timedOutAddrs {
 			addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
 
-			// check whether has incoming consistent value transfer
+			// check whether the timed out address has an incoming consistent value transfer,
 			// and if so, don't use it in the input selection
-			// (even though the address is timed out)
-			var hasIncomingConsistentTransfer bool
-			bndls, err := a.api.GetBundlesFromAddresses(Hashes{addr}, true)
-			if err != nil {
-				return 0, nil, nil, err
-			}
-			for i := range bndls {
-				if *(bndls[i][0]).Persistence {
-					continue
-				}
-				// check whether it's even a deposit to the address we are checking
-				var isDepositToAddr bool
-				for j := range bndls[i] {
-					if bndls[i][j].Address == addr {
-						if bndls[i][j].Value > 0 {
-							isDepositToAddr = true
-							break
-						}
-					}
-				}
-
-				// ignore this transfer as it isn't an incoming value transfer
-				if !isDepositToAddr {
-					continue
-				}
-
-				// here we have a bundle which is not yet confirmed
-				// and is depositing something onto this address.
-				// lets check it for consistency
-				consistent, _, err := a.api.CheckConsistency(bndls[i][0].Hash)
-				if err != nil {
-					return 0, nil, nil, err
-				}
-				if consistent {
-					hasIncomingConsistentTransfer = true
-					break
-				}
-			}
-
-			if hasIncomingConsistentTransfer {
+			if has, err := a.hasIncomingConsistentTransfer(addr); has || err != nil {
 				continue
 			}
 
 			resp, err := a.api.GetBalances(Hashes{addr}, 100, subtangleHash)
 			if err != nil {
-				return 0, nil, nil, err
+				return 0, nil, nil, errors.Wrapf(err, "unable to fetch balance of timed out address %s (key index %d) for input selection", addr, keyIndex)
 			}
 
 			balance := resp.Balances[0]
@@ -751,6 +732,48 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 	return sum, inputs, toRemove, nil
 }
 
+func (a *Account) hasIncomingConsistentTransfer(addr Hash) (bool, error) {
+	var has bool
+	bndls, err := a.api.GetBundlesFromAddresses(Hashes{addr}, true)
+	if err != nil {
+		return false, err
+	}
+	for i := range bndls {
+		if *(bndls[i][0]).Persistence {
+			continue
+		}
+		// check whether it's even a deposit to the address we are checking
+		var isDepositToAddr bool
+		for j := range bndls[i] {
+			if bndls[i][j].Address == addr {
+				if bndls[i][j].Value > 0 {
+					isDepositToAddr = true
+					break
+				}
+			}
+		}
+
+		// ignore this transfer as it isn't an incoming value transfer
+		if !isDepositToAddr {
+			continue
+		}
+
+		// here we have a bundle which is not yet confirmed
+		// and is depositing something onto this address.
+		// lets check it for consistency
+		hash := bndls[i][0].Hash
+		consistent, _, err := a.api.CheckConsistency(hash)
+		if err != nil {
+			return false, errors.Wrapf(err, "unable to check consistency of tx %s in incoming consistent transfer check", hash)
+		}
+		if consistent {
+			has = true
+			break
+		}
+	}
+	return has, nil
+}
+
 func (a *Account) usableBalance() (uint64, error) {
 	balance, _, _, err := a.inputSelectionStrat(a, 0, true)
 	return balance, err
@@ -759,7 +782,7 @@ func (a *Account) usableBalance() (uint64, error) {
 func (a *Account) totalBalance() (uint64, error) {
 	state, err := a.storage.LoadAccount(a.id)
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrap(err, "unable to load account state for querying total balance")
 	}
 
 	depositReqsCount := len(state.DepositRequests)
@@ -769,7 +792,7 @@ func (a *Account) totalBalance() (uint64, error) {
 
 	solidSubtangleMilestone, err := a.api.GetLatestSolidSubtangleMilestone()
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrap(err, "unable to fetch latest solid subtangle milestone for querying total balance")
 	}
 	subtangleHash := solidSubtangleMilestone.LatestSolidSubtangleMilestone
 
@@ -783,7 +806,7 @@ func (a *Account) totalBalance() (uint64, error) {
 
 	balances, err := a.api.GetBalances(addrs, 100, subtangleHash)
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrap(err, "unable to fetch balances for computing total balance")
 	}
 	var sum uint64
 	for _, balance := range balances.Balances {
@@ -908,8 +931,12 @@ func (a *Account) checkIncomingTransfers() {
 
 const approxAboveMaxDepthMinutes = 5
 
-func aboveMaxDepth(ts time.Time) bool {
-	return time.Now().Sub(ts).Minutes() < approxAboveMaxDepthMinutes
+func aboveMaxDepth(clock Clock, ts time.Time) (bool, error) {
+	currentTime, err := clock.Now()
+	if err != nil {
+		return false, err
+	}
+	return currentTime.Sub(ts).Minutes() < approxAboveMaxDepthMinutes, nil
 }
 
 const maxDepth = 15
@@ -930,11 +957,11 @@ func (a *Account) promoteAndReattach() {
 	send := func(preparedBundle []Trytes, tips *api.TransactionsToApprove) (Hash, error) {
 		readyBundle, err := a.api.AttachToTangle(tips.TrunkTransaction, tips.BranchTransaction, a.mwm, preparedBundle)
 		if err != nil {
-			return "", err
+			return "", errors.Wrap(err, "performing PoW for promote/reattach cycle bundle failed")
 		}
 		readyBundle, err = a.api.StoreAndBroadcast(readyBundle)
 		if err != nil {
-			return "", err
+			return "", errors.Wrap(err, "unable to store/broadcast bundle in promote/reattach cycle")
 		}
 		tailTx, err := transaction.AsTransactionObject(readyBundle[0])
 		if err != nil {
@@ -960,7 +987,7 @@ func (a *Account) promoteAndReattach() {
 			pTransfers := bundle.Transfers{bundle.EmptyTransfer}
 			preparedBundle, err := a.api.PrepareTransfers(emptySeed, pTransfers, api.PrepareTransfersOptions{})
 			if err != nil {
-				return "", err
+				return "", errors.Wrap(err, "unable to prepare promotion bundle")
 			}
 			return send(preparedBundle, tips)
 		}
@@ -969,7 +996,7 @@ func (a *Account) promoteAndReattach() {
 	reattach := func(essenceBndl bundle.Bundle) (Hash, error) {
 		tips, err := a.api.GetTransactionsToApprove(a.depth)
 		if err != nil {
-			return "", err
+			return "", errors.Wrapf(err, "unable to GTTA for reattachment in promote/reattach cycle (bundle %s)", essenceBndl[0].Bundle)
 		}
 		essenceTrytes, err := transaction.TransactionsToTrytes(essenceBndl)
 		if err != nil {
@@ -1015,7 +1042,7 @@ func (a *Account) promoteAndReattach() {
 				continue
 			}
 
-			if !aboveMaxDepth(time.Unix(int64(tx.Timestamp), 0)) {
+			if above, err := aboveMaxDepth(a.clock, time.Unix(int64(tx.Timestamp), 0)); !above || err != nil {
 				continue
 			}
 
@@ -1040,7 +1067,6 @@ func (a *Account) promoteAndReattach() {
 				PromotionTailTxHash: promoteTailTxHash,
 				OriginTailTxHash:    key,
 			}, EventPromotion)
-			//storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash", ErrorPromoteTransfer)
 			continue
 		}
 
@@ -1068,7 +1094,6 @@ func (a *Account) promoteAndReattach() {
 			OriginTailTxHash:    key,
 			PromotionTailTxHash: promoteTailTxHash,
 		}, EventPromotion)
-		//storeTailTxHash(key, promoteTailTxHash, "unable to store promotion tx tail hash for reattachment", ErrorPromoteTransfer)
 	}
 }
 

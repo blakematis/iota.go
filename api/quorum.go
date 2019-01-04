@@ -419,7 +419,7 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 		if hc.injectDefault(cmd, out) {
 			return nil
 		}
-		return errors.Wrapf(ErrQuorumNotReached, "%0.2f of needed %0.2f reached", percentage, hc.settings.Threshold)
+		return errors.Wrapf(ErrQuorumNotReached, "%0.2f of needed %0.2f reached, query (%T)", percentage, hc.settings.Threshold, cmd)
 	}
 
 	quorumResult := responses[selected]

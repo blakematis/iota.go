@@ -23,8 +23,8 @@ const usedSecLvl = consts.SecurityLevelLow
 
 type fakeclock struct{}
 
-func (fc *fakeclock) Now() time.Time {
-	return time.Date(2018, time.November, 22, 21, 53, 0, 0, time.UTC)
+func (fc *fakeclock) Now() (time.Time, error) {
+	return time.Date(2018, time.November, 22, 21, 53, 0, 0, time.UTC), nil
 }
 
 var _ = Describe("Account", func() {
