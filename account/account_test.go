@@ -101,10 +101,10 @@ var _ = Describe("Account", func() {
 	})
 
 	Context("Operations", func() {
-		Context("Balance()", func() {
+		Context("UsableBalance()", func() {
 			BeforeEach(newAccount)
 
-			It("returns the correct balance", func() {
+			It("returns the correct usableBalance", func() {
 				defer gock.Flush()
 				balances := []string{"10", "20", "30"}
 				for i := 0; i < 3; i++ {
@@ -129,13 +129,13 @@ var _ = Describe("Account", func() {
 					_, err := acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t})
 					Expect(err).ToNot(HaveOccurred())
 				}
-				balance, err := acc.Balance()
+				balance, err := acc.UsableBalance()
 				Expect(err).ToNot(HaveOccurred())
 				Expect(balance).To(Equal(uint64(60)))
 			})
 
-			It("returns the 0 balance on a new account", func() {
-				balance, err := acc.Balance()
+			It("returns the 0 usableBalance on a new account", func() {
+				balance, err := acc.UsableBalance()
 				Expect(err).ToNot(HaveOccurred())
 				Expect(balance).To(Equal(uint64(0)))
 			})
@@ -165,7 +165,7 @@ var _ = Describe("Account", func() {
 				trunkTx := strings.Repeat("A", 81)
 				branchTx := strings.Repeat("B", 81)
 
-				// balance query
+				// usableBalance query
 				defer gock.Flush()
 				gock.New(DefaultLocalIRIURI).
 					Persist().
@@ -234,8 +234,8 @@ var _ = Describe("Account", func() {
 				_, err = acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t, ExpectedAmount: &expectedAmount})
 				Expect(err).ToNot(HaveOccurred())
 
-				By("having the correct current balance")
-				balance, err := acc.Balance()
+				By("having the correct current usableBalance")
+				balance, err := acc.UsableBalance()
 				Expect(err).ToNot(HaveOccurred())
 				Expect(balance).To(Equal(uint64(100)))
 

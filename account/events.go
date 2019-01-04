@@ -27,15 +27,15 @@ const (
 )
 
 type PromotionReattachmentEvent struct {
-	OriginTailTxHash       Hash
-	BundleHash             Hash
-	PromotionTailTxHash    Hash
-	ReattachmentTailTxHash Hash
+	OriginTailTxHash       Hash `json:"original_tail_tx_hash"`
+	BundleHash             Hash `json:"bundle_hash"`
+	PromotionTailTxHash    Hash `json:"promotion_tail_tx_hash"`
+	ReattachmentTailTxHash Hash `json:"reattachment_tail_tx_hash"`
 }
 
 type ErrorEvent struct {
-	Type  ErrorType
-	Error error
+	Type  ErrorType `json:"error_type"`
+	Error error     `json:"error"`
 }
 
 type ErrorType byte

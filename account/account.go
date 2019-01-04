@@ -33,7 +33,8 @@ type action byte
 const (
 	actionSend action = iota
 	actionNewDepositAddress
-	actionCurrentBalance
+	actionUsableBalance
+	actionTotalBalance
 	actionIsNew
 	actionTriggerTransferPolling
 	actionShutdown
@@ -92,7 +93,7 @@ type AccountsOpts struct {
 	Clock Clock
 	// A filter which takes care of filtering incoming transfer events.
 	ReceiveEventFilter ReceiveEventFilter
-	// The input selection strategy used to determine inputs and balance.
+	// The input selection strategy used to determine inputs and usable balance.
 	InputSelectionStrategy InputSelectionStrategyFunc
 }
 
@@ -241,9 +242,24 @@ func (a *Account) NewDepositRequest(req *deposit.Request) (*deposit.Conditions, 
 	return payload.item.(*deposit.Conditions), nil
 }
 
-// Balance gets the current balance.
-func (a *Account) Balance() (uint64, error) {
-	a.request <- actionrequest{Action: actionCurrentBalance}
+// UsableBalance gets the current usable balance.
+// The balance is computed from all current deposit addresses which are ready
+// for input selection. To get the current total balance, use TotalBalance().
+func (a *Account) UsableBalance() (uint64, error) {
+	a.request <- actionrequest{Action: actionUsableBalance}
+	payload := <-a.sendBackChan
+	if payload.err != nil {
+		return 0, payload.err
+	}
+	return payload.item.(uint64), nil
+}
+
+// TotalBalance gets the current total balance.
+// The total balance is computed from all currently allocated deposit addresses.
+// It does not represent the actual usable balance for doing transfers.
+// Use UsableBalance() to get the current usable balance.
+func (a *Account) TotalBalance() (uint64, error) {
+	a.request <- actionrequest{Action: actionTotalBalance}
 	payload := <-a.sendBackChan
 	if payload.err != nil {
 		return 0, payload.err
@@ -361,8 +377,11 @@ func (a *Account) runEventLoop() error {
 				case actionNewDepositAddress:
 					depReq := req.Request.(*deposit.Request)
 					a.sendBackChan <- actionresponse{item: a.addrFunc(depReq)}
-				case actionCurrentBalance:
-					balance, err := a.balance()
+				case actionUsableBalance:
+					balance, err := a.usableBalance()
+					a.sendBackChan <- actionresponse{item: balance, err: err}
+				case actionTotalBalance:
+					balance, err := a.totalBalance()
 					a.sendBackChan <- actionresponse{item: balance, err: err}
 				case actionTriggerTransferPolling:
 					a.pollTransfers()
@@ -538,6 +557,13 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 		return 0, nil, nil, consts.ErrInsufficientBalance
 	}
 
+	// get the current solid subtangle milestone for doing each getBalance query with the same milestone
+	solidSubtangleMilestone, err := a.api.GetLatestSolidSubtangleMilestone()
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	subtangleHash := solidSubtangleMilestone.LatestSolidSubtangleMilestone
+
 	now := time.Now()
 	selected := []api.Input{}
 	selectedTimedout := []uint64{}
@@ -552,7 +578,7 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 
 	selectIndex := func(keyIndex uint64, expectedAmount uint64) error {
 		addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
-		resp, err := a.api.GetBalances(Hashes{addr}, 100)
+		resp, err := a.api.GetBalances(Hashes{addr}, 100, subtangleHash)
 		if err != nil {
 			return err
 		}
@@ -602,7 +628,7 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 		// single
 		if req.ExpectedAmount == nil {
 			addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
-			resp, err := a.api.GetBalances(Hashes{addr}, 100)
+			resp, err := a.api.GetBalances(Hashes{addr}, 100, subtangleHash)
 			if err != nil {
 				return 0, nil, nil, err
 			}
@@ -687,7 +713,7 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 				continue
 			}
 
-			resp, err := a.api.GetBalances(Hashes{addr}, 100)
+			resp, err := a.api.GetBalances(Hashes{addr}, 100, subtangleHash)
 			if err != nil {
 				return 0, nil, nil, err
 			}
@@ -725,9 +751,46 @@ func DefaultInputSelection(a *Account, transferValue uint64, balanceCheck bool) 
 	return sum, inputs, toRemove, nil
 }
 
-func (a *Account) balance() (uint64, error) {
-	usableBalance, _, _, err := a.inputSelectionStrat(a, 0, true)
-	return usableBalance, err
+func (a *Account) usableBalance() (uint64, error) {
+	balance, _, _, err := a.inputSelectionStrat(a, 0, true)
+	return balance, err
+}
+
+func (a *Account) totalBalance() (uint64, error) {
+	state, err := a.storage.LoadAccount(a.id)
+	if err != nil {
+		return 0, err
+	}
+
+	depositReqsCount := len(state.DepositRequests)
+	if depositReqsCount == 0 {
+		return 0, nil
+	}
+
+	solidSubtangleMilestone, err := a.api.GetLatestSolidSubtangleMilestone()
+	if err != nil {
+		return 0, err
+	}
+	subtangleHash := solidSubtangleMilestone.LatestSolidSubtangleMilestone
+
+	addrs := make(Hashes, len(state.DepositRequests))
+	var i int
+	for keyIndex, _ := range state.DepositRequests {
+		addr, _ := address.GenerateAddress(a.seed, keyIndex, a.secLvl, true)
+		addrs[i] = addr
+		i++
+	}
+
+	balances, err := a.api.GetBalances(addrs, 100, subtangleHash)
+	if err != nil {
+		return 0, err
+	}
+	var sum uint64
+	for _, balance := range balances.Balances {
+		sum += balance
+	}
+
+	return sum, nil
 }
 
 func (a *Account) hasIncomingTransfer(index uint64) (bool, error) {
