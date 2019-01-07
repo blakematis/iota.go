@@ -200,7 +200,7 @@ var _ = Describe("Quorum", func() {
 			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
 				Nodes:                      nodes,
 				Threshold:                  0.75,
-				MaxSubTangleMilestoneDelta: 1,
+				MaxSubtangleMilestoneDelta: 1,
 			})
 			defer gock.Flush()
 			req := &GetLatestSolidSubtangleMilestoneCommand{Command: Command{GetNodeInfoCmd}}
@@ -225,11 +225,11 @@ var _ = Describe("Quorum", func() {
 			Expect(res.LatestSolidSubtangleMilestone).To(Equal(nodeInfoRes.LatestSolidSubtangleMilestone))
 		})
 
-		It("returns an error when MaxSubTangleMilestoneDelta is exceeded", func() {
+		It("returns an error when MaxSubtangleMilestoneDelta is exceeded", func() {
 			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
 				Nodes:                      nodes,
 				Threshold:                  0.75,
-				MaxSubTangleMilestoneDelta: 2,
+				MaxSubtangleMilestoneDelta: 2,
 			})
 			defer gock.Flush()
 			req := &GetLatestSolidSubtangleMilestoneCommand{Command: Command{GetNodeInfoCmd}}
@@ -256,7 +256,7 @@ var _ = Describe("Quorum", func() {
 			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
 				Nodes:                      nodes,
 				Threshold:                  0.75,
-				MaxSubTangleMilestoneDelta: 2,
+				MaxSubtangleMilestoneDelta: 2,
 			})
 			defer gock.Flush()
 			req := &GetLatestSolidSubtangleMilestoneCommand{Command: Command{GetNodeInfoCmd}}

@@ -94,13 +94,13 @@ type QuorumHTTPClientSettings struct {
 	// or 'StoreTransactionsCmd'
 	ForceQuorumSend map[IRICommand]struct{}
 
-	// When querying for the latest solid subtangle milestone in quorum, MaxSubTangleMilestoneDelta
+	// When querying for the latest solid subtangle milestone in quorum, MaxSubtangleMilestoneDelta
 	// defines how far apart the highest and lowest latest solid subtangle milestone are allowed
-	// to be a apart. A low MaxSubTangleMilestoneDelta ensures that the nodes have mostly the same ledger state.
-	// A high MaxSubTangleMilestoneDelta allows for higher desynchronisation between the used nodes.
+	// to be a apart. A low MaxSubtangleMilestoneDelta ensures that the nodes have mostly the same ledger state.
+	// A high MaxSubtangleMilestoneDelta allows for higher desynchronisation between the used nodes.
 	// Recommended value is 1, meaning that the highest and lowest latest solid subtangle milestones
 	// must only be apart max. 1 index.
-	MaxSubTangleMilestoneDelta uint64
+	MaxSubtangleMilestoneDelta uint64
 
 	// Default values which are returned when no quorum could be reached
 	// for certain types of calls.
@@ -508,14 +508,14 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	}
 
 	// when querying for the latest solid subtangle milestone,
-	// we do not apply the default quorum behavior but take the MaxSubTangleMilestoneDelta into consideration.
+	// we do not apply the default quorum behavior but take the MaxSubtangleMilestoneDelta into consideration.
 	// note that we explicitly check the status code in the response against the NoResponseTolerance.
 	if isLatestSolidSubtangleQuery {
 		delta := subtangleCheck.highest - subtangleCheck.lowest
-		if delta > hc.settings.MaxSubTangleMilestoneDelta {
+		if delta > hc.settings.MaxSubtangleMilestoneDelta {
 			return errors.Wrapf(ErrExceededMaxSubtangleMilestoneDelta, "lowest node (%s) has %d, highest node (%s) has %d, max. allowed delta %d",
 				*subtangleCheck.lowestNode, subtangleCheck.lowest,
-				*subtangleCheck.highestNode, subtangleCheck.highest, hc.settings.MaxSubTangleMilestoneDelta)
+				*subtangleCheck.highestNode, subtangleCheck.highest, hc.settings.MaxSubtangleMilestoneDelta)
 		}
 		o := out.(*GetLatestSolidSubtangleMilestoneResponse)
 		o.LatestSolidSubtangleMilestone = subtangleCheck.lowestHash
