@@ -227,11 +227,11 @@ func (api *API) GetBundlesFromAddresses(addresses Hashes, inclusionState ...bool
 // GetLatestInclusion fetches inclusion states of the given transactions
 // by calling GetInclusionStates using the latest solid subtangle milestone from GetNodeInfo.
 func (api *API) GetLatestInclusion(txHashes Hashes) ([]bool, error) {
-	nodeInfo, err := api.GetNodeInfo()
+	res, err := api.GetLatestSolidSubtangleMilestone()
 	if err != nil {
 		return nil, err
 	}
-	return api.GetInclusionStates(txHashes, nodeInfo.LatestSolidSubtangleMilestone)
+	return api.GetInclusionStates(txHashes, res.LatestSolidSubtangleMilestone)
 }
 
 // GetNewAddress generates and returns a new address by calling FindTransactions

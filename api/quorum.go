@@ -6,6 +6,7 @@ import (
 	"github.com/cespare/xxhash"
 	. "github.com/iotaledger/iota.go/consts"
 	"github.com/iotaledger/iota.go/pow"
+	"github.com/iotaledger/iota.go/trinary"
 	"github.com/pkg/errors"
 	"io/ioutil"
 	"math"
@@ -28,11 +29,13 @@ const (
 
 // errors produced by the quorum http provider
 var (
-	ErrInvalidQuorumThreshold      = errors.New("quorum threshold is set too low, must be >0.5")
-	ErrQuorumNotReached            = errors.New("the quorum didn't reach a satisfactory result")
-	ErrExceededNoResponseTolerance = errors.New("exceeded no-response tolerance for quorum")
-	ErrNotEnoughNodesForQuorum     = errors.New("at least 2 nodes must be defined for quorum")
-	ErrNoLatestSolidSubtangleInfo  = errors.New("no latest solid subtangle info found")
+	ErrInvalidQuorumThreshold                 = errors.New("quorum threshold is set too low, must be >0.5")
+	ErrQuorumNotReached                       = errors.New("the quorum didn't reach a satisfactory result")
+	ErrExceededNoResponseTolerance            = errors.New("exceeded no-response tolerance for quorum")
+	ErrNotEnoughNodesForQuorum                = errors.New("at least 2 nodes must be defined for quorum")
+	ErrNoLatestSolidSubtangleInfo             = errors.New("no latest solid subtangle info found")
+	ErrExceededMaxSubtangleMilestoneDelta     = errors.New("exceeded max subtangle milestone delta between nodes")
+	ErrNonOkStatusCodeSubtangleMilestoneQuery = errors.New("non ok status code for subtangle milestone query")
 )
 
 // MinimumQuorumThreshold is the minimum threshold the quorum settings
@@ -91,8 +94,13 @@ type QuorumHTTPClientSettings struct {
 	// or 'StoreTransactionsCmd'
 	ForceQuorumSend map[IRICommand]struct{}
 
-	// Whether to execute BroadcastTransactions() on all nodes
-	SpreadBroadcastTransaction bool
+	// When querying for the latest solid subtangle milestone in quorum, MaxSubTangleMilestoneDelta
+	// defines how far apart the highest and lowest latest solid subtangle milestone are allowed
+	// to be a apart. A low MaxSubTangleMilestoneDelta ensures that the nodes have mostly the same ledger state.
+	// A high MaxSubTangleMilestoneDelta allows for higher desynchronisation between the used nodes.
+	// Recommended value is 1, meaning that the highest and lowest latest solid subtangle milestones
+	// must only be apart max. 1 index.
+	MaxSubTangleMilestoneDelta uint64
 
 	// Default values which are returned when no quorum could be reached
 	// for certain types of calls.
@@ -200,37 +208,72 @@ var nonQuorumCommands = map[IRICommand]struct{}{
 	"storeTransactions":        {},
 }
 
-type quorumresponse struct {
-	data   []byte
-	status int
-}
+var subMileHashKey = [30]byte{34, 108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101}
+var subMileIndexKey = [34]byte{108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101, 73, 110, 100, 101, 120}
+var durationKey = [11]byte{34, 100, 117, 114, 97, 116, 105, 111, 110, 34, 58}
 
-var subMileTag = [30]byte{34, 108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101}
-var subMileIndexTag = [34]byte{108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101, 73, 110, 100, 101, 120}
+const (
+	commaAscii             = 44
+	colonAscii             = 58
+	closingCurlyBraceAscii = 125
+	quoteAscii             = 34
+)
 
-const commaAsciiVal = 44
+var commaSep = [1]byte{commaAscii}
+var quoteSep = [1]byte{quoteAscii}
+var colonSep = [1]byte{colonAscii}
 
+// reduces the data of a getNodeInfo response to just the latest milestone data
 func reduceToLatestSolidSubtangleData(data []byte) ([]byte, error) {
-	indexOfSubtangleHashKey := bytes.Index(data, subMileTag[:])
+	indexOfSubtangleHashKey := bytes.Index(data, subMileHashKey[:])
 	if indexOfSubtangleHashKey == -1 {
-		return nil, ErrNoLatestSolidSubtangleInfo
+		return nil, errors.Wrap(ErrNoLatestSolidSubtangleInfo, "subtangle milestone hash field not found")
 	}
-	indexOfSubtangleIndexKey := bytes.Index(data, subMileIndexTag[:])
+	indexOfSubtangleIndexKey := bytes.Index(data, subMileIndexKey[:])
 	if indexOfSubtangleIndexKey == -1 {
-		return nil, ErrNoLatestSolidSubtangleInfo
+		return nil, errors.Wrap(ErrNoLatestSolidSubtangleInfo, "subtangle milestone index field not found")
 	}
-	commaIndex := bytes.Index(data[indexOfSubtangleIndexKey:], []byte{commaAsciiVal})
+	commaIndex := bytes.Index(data[indexOfSubtangleIndexKey:], commaSep[:])
 	if commaIndex == -1 {
-		return nil, ErrNoLatestSolidSubtangleInfo
+		return nil, errors.Wrap(ErrNoLatestSolidSubtangleInfo, "ending comma after subtangle milestone index field not found")
 	}
 	if indexOfSubtangleIndexKey+commaIndex > len(data) {
-		return nil, ErrNoLatestSolidSubtangleInfo
+		return nil, errors.Wrap(ErrNoLatestSolidSubtangleInfo, "comma position larger than data")
 	}
 	part := data[indexOfSubtangleHashKey : indexOfSubtangleIndexKey+commaIndex]
 	// add opening/closing bracket
 	part = append([]byte{123}, part...)
 	part = append(part, 125)
 	return part, nil
+}
+
+// extracts the latest solid subtangle milestone hash of a reduced getNodeInfo response
+func extractSubTangleMilestoneHash(data []byte) (string, error) {
+	firstColonIndex := bytes.Index(data, colonSep[:])
+	if firstColonIndex == -1 {
+		return "", errors.Wrap(ErrNoLatestSolidSubtangleInfo, "unable to find hash")
+	}
+	leadingQuoteIndex := bytes.Index(data[firstColonIndex+1:], quoteSep[:])
+	if leadingQuoteIndex == -1 {
+		return "", errors.Wrap(ErrNoLatestSolidSubtangleInfo, "unable to find leading quote in hash search")
+	}
+	leadingQuoteIndex = firstColonIndex + 1 + leadingQuoteIndex
+	endingQuoteIndex := bytes.Index(data[leadingQuoteIndex+1:], quoteSep[:])
+	if endingQuoteIndex == -1 {
+		return "", errors.Wrap(ErrNoLatestSolidSubtangleInfo, "unable to find ending quote in hash search")
+	}
+	endingQuoteIndex = leadingQuoteIndex + 1 + endingQuoteIndex
+	return string(data[leadingQuoteIndex+1 : endingQuoteIndex]), nil
+}
+
+// extracts the latest solid subtangle milestone index of a reduced getNodeInfo response
+func extractSubTangleMilestoneIndex(data []byte) (uint64, error) {
+	lastColonIndex := bytes.LastIndex(data, colonSep[:])
+	if lastColonIndex == -1 {
+		return 0, errors.Wrap(ErrNoLatestSolidSubtangleInfo, "unable to find index")
+	}
+	index := data[lastColonIndex+1 : len(data)-1]
+	return strconv.ParseUint(string(index), 10, 64)
 }
 
 // injects the optional default set data into the response
@@ -271,19 +314,78 @@ func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool
 	return false
 }
 
-const closingCurlyBraceAscii = 125
-
-var durationKey = [11]byte{34, 100, 117, 114, 97, 116, 105, 111, 110, 34, 58}
-
 // removes the duration value from the response
 // as multiple nodes will always return a different one
 func removeDurationField(data []byte) []byte {
-	indexOfDurationField := bytes.Index(data, durationKey[:])
+	indexOfDurationField := bytes.LastIndex(data, durationKey[:])
 	if indexOfDurationField == -1 {
 		return data
 	}
 	curlyBraceIndex := bytes.Index(data[indexOfDurationField:], []byte{closingCurlyBraceAscii})
 	return append(data[:indexOfDurationField-1], data[indexOfDurationField+curlyBraceIndex:]...)
+}
+
+type quorumcheck struct {
+	votes map[uint64]*quorumvote
+	mu    sync.Mutex
+}
+
+type quorumvote struct {
+	votes  float64
+	data   []byte
+	status int
+}
+
+func (q *quorumcheck) add(hash uint64, data []byte, code int) {
+	q.mu.Lock()
+	_, ok := q.votes[hash]
+	if ok {
+		q.votes[hash].votes++
+	} else {
+		q.votes[hash] = &quorumvote{votes: 1, status: code, data: data}
+	}
+	q.mu.Unlock()
+}
+
+type subtanglecheck struct {
+	highest     uint64
+	highestNode *string
+	lowest      uint64
+	lowestHash  trinary.Hash
+	lowestNode  *string
+	mu          sync.Mutex
+}
+
+func (s *subtanglecheck) add(data []byte, node *string) error {
+	// reduce data
+	subtangleData, err := reduceToLatestSolidSubtangleData(data)
+	if err != nil {
+		return err
+	}
+
+	// extract index
+	index, err := extractSubTangleMilestoneIndex(subtangleData)
+	if err != nil {
+		return err
+	}
+
+	// mutate check
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index < s.lowest || s.lowest == 0 {
+		s.lowest = index
+		hash, err := extractSubTangleMilestoneHash(subtangleData)
+		if err != nil {
+			return err
+		}
+		s.lowestNode = node
+		s.lowestHash = hash
+	}
+	if index > s.highest || s.highest == 0 {
+		s.highest = index
+		s.highestNode = node
+	}
+	return nil
 }
 
 // ignore
@@ -320,14 +422,20 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	// for any errors which occurred during sending the request
 	errMu := sync.Mutex{}
 	anyErrors := []error{}
-
-	// holds the count of same responses
-	mu := sync.Mutex{}
-	votes := map[uint64]float64{}
-	responses := map[uint64]quorumresponse{}
-
 	wg := sync.WaitGroup{}
 	wg.Add(len(hc.settings.Nodes))
+
+	// depending on the command to execute we do different checks
+	var quorumCheck *quorumcheck
+	var subtangleCheck *subtanglecheck
+
+	if isLatestSolidSubtangleQuery {
+		subtangleCheck = &subtanglecheck{}
+	} else {
+		quorumCheck = &quorumcheck{
+			votes: make(map[uint64]*quorumvote),
+		}
+	}
 
 	// query each not in parallel
 	for i := range hc.settings.Nodes {
@@ -359,7 +467,12 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 			}
 			defer resp.Body.Close()
 
-			bs, err := ioutil.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK && isLatestSolidSubtangleQuery {
+				anyError = ErrNonOkStatusCodeSubtangleMilestoneQuery;
+				return
+			}
+
+			data, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
 				anyError = err
 				return
@@ -368,26 +481,19 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 			// extract only latest solid subtangle data from get node info
 			// call to be able to form a quorum around that response
 			if isLatestSolidSubtangleQuery {
-				reducedData, err := reduceToLatestSolidSubtangleData(bs)
-				if err != nil {
+				if err := subtangleCheck.add(data, &hc.settings.Nodes[i]); err != nil {
 					anyError = err
-					return
 				}
-				bs = reducedData
+				return
 			}
 
 			// remove the duration field from the response
 			// as multiple nodes will always give a different answer
-			bs = removeDurationField(bs)
+			data = removeDurationField(data)
 
-			hash := xxhash.Sum64(bs)
-			mu.Lock()
-			votes[hash]++
-			_, ok := responses[hash]
-			if !ok {
-				responses[hash] = quorumresponse{data: bs, status: resp.StatusCode}
-			}
-			mu.Unlock()
+			// add quorum vote
+			hash := xxhash.Sum64(data)
+			quorumCheck.add(hash, data, resp.StatusCode)
 		}(i)
 	}
 	wg.Wait()
@@ -401,11 +507,27 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 		return errors.Wrapf(ErrExceededNoResponseTolerance, "%d%% of nodes failed to give a response, first error '%v'", int(perc), anyErrors[0].Error())
 	}
 
+	// when querying for the latest solid subtangle milestone,
+	// we do not apply the default quorum behavior but take the MaxSubTangleMilestoneDelta into consideration.
+	// note that we explicitly check the status code in the response against the NoResponseTolerance.
+	if isLatestSolidSubtangleQuery {
+		delta := subtangleCheck.highest - subtangleCheck.lowest
+		if delta > hc.settings.MaxSubTangleMilestoneDelta {
+			return errors.Wrapf(ErrExceededMaxSubtangleMilestoneDelta, "lowest node (%s) has %d, highest node (%s) has %d, max. allowed delta %d",
+				*subtangleCheck.lowestNode, subtangleCheck.lowest,
+				*subtangleCheck.highestNode, subtangleCheck.highest, hc.settings.MaxSubTangleMilestoneDelta)
+		}
+		o := out.(*GetLatestSolidSubtangleMilestoneResponse)
+		o.LatestSolidSubtangleMilestone = subtangleCheck.lowestHash
+		o.LatestSolidSubtangleMilestoneIndex = int64(subtangleCheck.lowest)
+		return nil
+	}
+
 	var mostVotes float64
 	var selected uint64
-	for key, v := range votes {
-		if mostVotes < v {
-			mostVotes = v
+	for key, v := range quorumCheck.votes {
+		if mostVotes < v.votes {
+			mostVotes = v.votes
 			selected = key
 		}
 	}
@@ -422,23 +544,24 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 		return errors.Wrapf(ErrQuorumNotReached, "%0.2f of needed %0.2f reached, query (%T)", percentage, hc.settings.Threshold, cmd)
 	}
 
-	quorumResult := responses[selected]
-	resultData := quorumResult.data
+	// extract final result and status code
+	statusCode := quorumCheck.votes[selected].status
+	result := quorumCheck.votes[selected].data
 
-	if quorumResult.status != http.StatusOK {
+	if statusCode != http.StatusOK {
 		errResp := &ErrorResponse{}
-		err = json.Unmarshal(resultData, errResp)
-		return handleError(errResp, err, errors.Wrapf(ErrNonOKStatusCodeFromAPIRequest, "http code %d", quorumResult.status))
+		err = json.Unmarshal(result, errResp)
+		return handleError(errResp, err, errors.Wrapf(ErrNonOKStatusCodeFromAPIRequest, "http code %d", statusCode))
 	}
 
-	if bytes.Contains(resultData, []byte(`"error"`)) || bytes.Contains(resultData, []byte(`"exception"`)) {
+	if bytes.Contains(result, []byte(`"error"`)) || bytes.Contains(result, []byte(`"exception"`)) {
 		errResp := &ErrorResponse{}
-		err = json.Unmarshal(resultData, errResp)
+		err = json.Unmarshal(result, errResp)
 		return handleError(errResp, err, ErrUnknownErrorFromAPIRequest)
 	}
 
 	if out == nil {
 		return nil
 	}
-	return json.Unmarshal(resultData, out)
+	return json.Unmarshal(result, out)
 }

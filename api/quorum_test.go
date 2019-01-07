@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
 	"gopkg.in/h2non/gock.v1"
+	"strings"
 )
 
 type fakereqres struct {
@@ -23,7 +24,7 @@ var _ = Describe("Quorum", func() {
 		nodes[i] = fmt.Sprintf("http:/%d", i)
 	}
 
-	Context("voting()", func() {
+	Context("Voting", func() {
 		It("throws an error when quorum couldn't be reached 0%", func() {
 			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
 				Nodes:     nodes,
@@ -173,7 +174,105 @@ var _ = Describe("Quorum", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(Equal(errorMsg))
 		})
+	})
 
+	Context("LatestSolidSubtangleMilestone", func() {
+		nodeInfoRes := GetNodeInfoResponse{
+			AppName:                            "IRI",
+			AppVersion:                         "",
+			Duration:                           100,
+			JREAvailableProcessors:             4,
+			JREFreeMemory:                      13020403,
+			JREMaxMemory:                       1241331231,
+			JRETotalMemory:                     4245234332,
+			LatestMilestone:                    strings.Repeat("X", 81),
+			LatestMilestoneIndex:               3,
+			LatestSolidSubtangleMilestone:      strings.Repeat("M", 81),
+			LatestSolidSubtangleMilestoneIndex: 1,
+			Neighbors:                          5,
+			PacketsQueueSize:                   23,
+			Time:                               213213214,
+			Tips:                               123,
+			TransactionsToRequest:              10,
+		}
+
+		It("returns the correct solid subtangle milestone", func() {
+			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
+				Nodes:                      nodes,
+				Threshold:                  0.75,
+				MaxSubTangleMilestoneDelta: 1,
+			})
+			defer gock.Flush()
+			req := &GetLatestSolidSubtangleMilestoneCommand{Command: Command{GetNodeInfoCmd}}
+			// we create a delta of 1
+			for i, node := range nodes {
+				resCopy := nodeInfoRes
+				if i%2 == 0 {
+					resCopy.LatestSolidSubtangleMilestoneIndex = 2
+					resCopy.LatestSolidSubtangleMilestone = strings.Repeat("N", 81)
+				}
+				gock.New(node).
+					Post("/").
+					MatchType("json").
+					JSON(req).
+					Reply(200).
+					JSON(resCopy)
+			}
+			res := &GetLatestSolidSubtangleMilestoneResponse{}
+			err := provider.Send(req, res)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.LatestSolidSubtangleMilestoneIndex).To(Equal(int64(1)))
+			Expect(res.LatestSolidSubtangleMilestone).To(Equal(nodeInfoRes.LatestSolidSubtangleMilestone))
+		})
+
+		It("returns an error when MaxSubTangleMilestoneDelta is exceeded", func() {
+			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
+				Nodes:                      nodes,
+				Threshold:                  0.75,
+				MaxSubTangleMilestoneDelta: 2,
+			})
+			defer gock.Flush()
+			req := &GetLatestSolidSubtangleMilestoneCommand{Command: Command{GetNodeInfoCmd}}
+			// delta of 3
+			for i, node := range nodes {
+				resCopy := nodeInfoRes
+				if i%2 == 0 {
+					resCopy.LatestSolidSubtangleMilestoneIndex = 4
+					resCopy.LatestSolidSubtangleMilestone = strings.Repeat("N", 81)
+				}
+				gock.New(node).
+					Post("/").
+					MatchType("json").
+					JSON(req).
+					Reply(200).
+					JSON(resCopy)
+			}
+			res := &GetLatestSolidSubtangleMilestoneResponse{}
+			err := provider.Send(req, res)
+			Expect(errors.Cause(err)).To(Equal(ErrExceededMaxSubtangleMilestoneDelta))
+		})
+
+		It("returns an error when faulty status codes are over no response tolerance", func() {
+			provider, _ := NewQuorumHTTPClient(QuorumHTTPClientSettings{
+				Nodes:                      nodes,
+				Threshold:                  0.75,
+				MaxSubTangleMilestoneDelta: 2,
+			})
+			defer gock.Flush()
+			req := &GetLatestSolidSubtangleMilestoneCommand{Command: Command{GetNodeInfoCmd}}
+			// delta of 3
+			for _, node := range nodes {
+				gock.New(node).
+					Post("/").
+					MatchType("json").
+					JSON(req).
+					Reply(404).
+					JSON(nodeInfoRes)
+			}
+			res := &GetLatestSolidSubtangleMilestoneResponse{}
+			err := provider.Send(req, res)
+			Expect(errors.Cause(err)).To(Equal(ErrExceededNoResponseTolerance))
+		})
 	})
 
 })
