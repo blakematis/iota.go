@@ -515,7 +515,8 @@ func (acc *Account) newDepositAddressGenerator() (AddrFunc, error) {
 
 func (acc *Account) emitEvent(payload interface{}, event AccountEvent) {
 	// used during startup to flush events
-	if !acc.eventsEnabled {
+	if !acc.eventsEnabled &&
+		(event == EventReceivedMessage || event == EventReceivingDeposit || event == EventReceivedDeposit) {
 		return
 	}
 
