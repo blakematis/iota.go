@@ -64,7 +64,7 @@ var _ = Describe("Account", func() {
 
 	newAccount := func() {
 		st = store.NewInMemoryStore()
-		acc, err = account.NewAccount(seed, st, api, &account.AccountsOpts{
+		acc, err = account.NewAccount(seed, st, api, &account.Settings{
 			Depth: 3, MWM: 9, SecurityLevel: usedSecLvl, Clock: &fakeclock{},
 		})
 		if err != nil {
@@ -75,7 +75,7 @@ var _ = Describe("Account", func() {
 	Context("account creation", func() {
 		It("successfully creates accounts given valid parameters/options", func() {
 			var err error
-			acc, err = account.NewAccount(seed, store.NewInMemoryStore(), api, &account.AccountsOpts{
+			acc, err = account.NewAccount(seed, store.NewInMemoryStore(), api, &account.Settings{
 				Depth: 3, MWM: 9, SecurityLevel: usedSecLvl,
 			})
 			Expect(err).ToNot(HaveOccurred())

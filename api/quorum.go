@@ -388,6 +388,20 @@ func (s *subtanglecheck) add(data []byte, node *string) error {
 	return nil
 }
 
+type sortedbytes []byte
+
+func (b sortedbytes) Len() int {
+	return len(b)
+}
+
+func (b sortedbytes) Less(i, j int) bool {
+	return b[i] < b[j]
+}
+
+func (b sortedbytes) Swap(i, j int) {
+	b[j], b[i] = b[i], b[j]
+}
+
 // ignore
 func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	comm, ok := cmd.(Commander)
@@ -491,8 +505,24 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 			// as multiple nodes will always give a different answer
 			data = removeDurationField(data)
 
+			var hash uint64
+
+			// as findTransactions responses don't guarantee ordering, we just simply
+			// sum up the bytes of the reduced response. it's highly unlikely that responses
+			// with different hashes will sum up to the same number.
+			if _, isFindTransactions := cmd.(*FindTransactionsCommand); isFindTransactions {
+				var sum uint64
+				for _, b := range data {
+					sum += uint64(b)
+				}
+				// shift the sum by the length of the data, thereby
+				// distancing responses with different lengths
+				sum *= uint64(len(data))
+				hash = sum
+			} else {
+				hash = xxhash.Sum64(data)
+			}
 			// add quorum vote
-			hash := xxhash.Sum64(data)
 			quorumCheck.add(hash, data, resp.StatusCode)
 		}(i)
 	}
