@@ -27,7 +27,7 @@ func (fc *fakeclock) Now() (time.Time, error) {
 	return time.Date(2018, time.November, 22, 21, 53, 0, 0, time.UTC), nil
 }
 
-var _ = Describe("Account", func() {
+var _ = Describe("account", func() {
 	api, err := ComposeAPI(HTTPClientSettings{}, nil)
 	if err != nil {
 		panic(err)
@@ -59,11 +59,12 @@ var _ = Describe("Account", func() {
 		"LUENADZTQWWUQ9P9EXINSJJVNZLYVARHYMEY9QMNFZNF9IVMBBMKGUBSZPNMTEMMKVWTMUVLQUBHCHHHX",
 	}
 
-	var acc *account.Account
+	var acc *account.account
 	var st *store.InMemoryStore
 
 	newAccount := func() {
 		st = store.NewInMemoryStore()
+		acc, err := acco
 		acc, err = account.NewAccount(seed, st, api, &account.Settings{
 			Depth: 3, MWM: 9, SecurityLevel: usedSecLvl, Clock: &fakeclock{},
 		})
