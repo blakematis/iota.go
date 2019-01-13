@@ -2,8 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"github.com/iotaledger/iota.go/account/deposit"
-	"github.com/iotaledger/iota.go/bundle"
 	"github.com/iotaledger/iota.go/trinary"
 	"sync"
 )
@@ -77,7 +75,7 @@ func (mem *InMemoryStore) WriteIndex(id string, index uint64) (error) {
 	return nil
 }
 
-func (mem *InMemoryStore) AddDepositRequest(id string, index uint64, depositRequest *deposit.Request) error {
+func (mem *InMemoryStore) AddDepositRequest(id string, index uint64, depositRequest *StoredDepositRequest) error {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
@@ -136,6 +134,23 @@ func (mem *InMemoryStore) RemovePendingTransfer(id string, tailTx trinary.Hash) 
 	return nil
 }
 
+func (mem *InMemoryStore) GetDepositRequests(id string) (map[uint64]*StoredDepositRequest, error) {
+	mem.muAccs.Lock()
+	defer mem.muAccs.Unlock()
+	state, ok := mem.accs[id]
+	if !ok {
+		return nil, ErrAccountNotFound
+	}
+	depReqs := make(map[uint64]*StoredDepositRequest)
+	// make a copy
+	for k, v := range state.DepositRequests {
+		// copy value which is a pointer
+		copyOfReq := *v
+		depReqs[k] = &copyOfReq
+	}
+	return depReqs, nil
+}
+
 func (mem *InMemoryStore) AddTailHash(id string, tailTx trinary.Hash, newTailTxHash trinary.Hash) error {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
@@ -152,24 +167,17 @@ func (mem *InMemoryStore) AddTailHash(id string, tailTx trinary.Hash, newTailTxH
 	return nil
 }
 
-func (mem *InMemoryStore) GetPendingTransfers(id string) (trinary.Hashes, bundle.Bundles, error) {
+func (mem *InMemoryStore) GetPendingTransfers(id string) (map[string]*PendingTransfer, error) {
 	mem.muAccs.Lock()
 	defer mem.muAccs.Unlock()
 	state, ok := mem.accs[id]
 	if !ok {
-		return nil, nil, ErrAccountNotFound
+		return nil, ErrAccountNotFound
 	}
-	bundles := make(bundle.Bundles, len(state.PendingTransfers))
-	tailTxs := make(trinary.Hashes, len(state.PendingTransfers))
-	i := 0
-	for tailTx, pendingTransfer := range state.PendingTransfers {
-		bndl, err := PendingTransferToBundle(pendingTransfer)
-		if err != nil {
-			return nil, nil, err
-		}
-		bundles[i] = bndl
-		tailTxs[i] = tailTx
-		i++
+	pendingTransfers := make(map[string]*PendingTransfer)
+	for k, v := range state.PendingTransfers {
+		copyOfPendTrans := *v
+		pendingTransfers[k] = &copyOfPendTrans
 	}
-	return tailTxs, bundles, nil
+	return pendingTransfers, nil
 }

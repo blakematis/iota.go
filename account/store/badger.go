@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"github.com/dgraph-io/badger"
-	"github.com/iotaledger/iota.go/account/deposit"
-	"github.com/iotaledger/iota.go/bundle"
 	. "github.com/iotaledger/iota.go/trinary"
 )
 
@@ -29,6 +27,11 @@ func (b *BadgerStore) init() error {
 	var err error
 	b.db, err = badger.Open(opts)
 	return err
+}
+
+// Close closes the badger store.
+func (b *BadgerStore) Close() error {
+	return b.db.Close()
 }
 
 type statemutationfunc func(state *AccountState) error
@@ -138,7 +141,7 @@ func (b *BadgerStore) WriteIndex(id string, index uint64) (error) {
 	})
 }
 
-func (b *BadgerStore) AddDepositRequest(id string, index uint64, depositRequest *deposit.Request) error {
+func (b *BadgerStore) AddDepositRequest(id string, index uint64, depositRequest *StoredDepositRequest) error {
 	return b.mutate(id, func(state *AccountState) error {
 		state.DepositRequests[index] = depositRequest
 		return nil
@@ -179,6 +182,17 @@ func (b *BadgerStore) RemovePendingTransfer(id string, tailTx Hash) error {
 	})
 }
 
+func (b *BadgerStore) GetDepositRequests(id string) (map[uint64]*StoredDepositRequest, error) {
+	var depReqs map[uint64]*StoredDepositRequest
+	if err := b.read(id, func(state *AccountState) error {
+		depReqs = state.DepositRequests
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return depReqs, nil
+}
+
 func (b *BadgerStore) AddTailHash(id string, tailTx Hash, newTailTxHash Hash) error {
 	return b.mutate(id, func(state *AccountState) error {
 		pendingTransfer, ok := state.PendingTransfers[tailTx];
@@ -190,25 +204,13 @@ func (b *BadgerStore) AddTailHash(id string, tailTx Hash, newTailTxHash Hash) er
 	})
 }
 
-func (b *BadgerStore) GetPendingTransfers(id string) (Hashes, bundle.Bundles, error) {
-	var bundles bundle.Bundles
-	var tailTxs Hashes
+func (b *BadgerStore) GetPendingTransfers(id string) (map[string]*PendingTransfer, error) {
+	var pendingTransfers map[string]*PendingTransfer
 	if err := b.read(id, func(state *AccountState) error {
-		bundles = make(bundle.Bundles, len(state.PendingTransfers))
-		tailTxs = make(Hashes, len(state.PendingTransfers))
-		i := 0
-		for tailTx, pendingTransfer := range state.PendingTransfers {
-			bndl, err := PendingTransferToBundle(pendingTransfer)
-			if err != nil {
-				return err
-			}
-			bundles[i] = bndl
-			tailTxs[i] = tailTx
-			i++
-		}
+		pendingTransfers = state.PendingTransfers
 		return nil
 	}); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return tailTxs, bundles, nil
+	return pendingTransfers, nil
 }

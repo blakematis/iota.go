@@ -16,16 +16,16 @@ func init() {
 
 func newaccountstate() *AccountState {
 	return &AccountState{
-		DepositRequests:  make(map[uint64]*deposit.Request, 0),
+		DepositRequests:  make(map[uint64]*StoredDepositRequest, 0),
 		PendingTransfers: make(map[string]*PendingTransfer, 0),
 	}
 }
 
 // AccountState is the underlying representation of the account data.
 type AccountState struct {
-	KeyIndex         uint64                      `json:"key_index"`
-	DepositRequests  map[uint64]*deposit.Request `json:"deposit_requests"`
-	PendingTransfers map[string]*PendingTransfer `json:"pending_transfers"`
+	KeyIndex         uint64                           `json:"key_index" bson:"key_index"`
+	DepositRequests  map[uint64]*StoredDepositRequest `json:"deposit_requests" bson:"deposit_requests"`
+	PendingTransfers map[string]*PendingTransfer      `json:"pending_transfers" bson:"pending_transfers"`
 }
 
 func (state *AccountState) IsNew() bool {
@@ -35,8 +35,16 @@ func (state *AccountState) IsNew() bool {
 // PendingTransfer defines a pending transfer in the store which is made up of the bundle's
 // essence trits and tail hashes of reattachments.
 type PendingTransfer struct {
-	Bundle []Trits `json:"bundle"`
-	Tails  Hashes  `json:"tails"`
+	Bundle []Trits `json:"bundle" bson:"bundle"`
+	Tails  Hashes  `json:"tails" bson:"tails"`
+}
+
+// StoredDepositRequest defines a stored deposit request.
+// It differs from the normal request only in having an additional field to hold the security level
+// used to generate the deposit address.
+type StoredDepositRequest struct {
+	deposit.Request
+	SecurityLevel consts.SecurityLevel `json:"security_level" bson:"security_level"`
 }
 
 // errors produced by the store package.
@@ -52,12 +60,13 @@ type Store interface {
 	RemoveAccount(id string) error
 	ReadIndex(id string) (uint64, error)
 	WriteIndex(id string, index uint64) error
-	AddDepositRequest(id string, index uint64, depositRequest *deposit.Request) error
+	AddDepositRequest(id string, index uint64, depositRequest *StoredDepositRequest) error
 	RemoveDepositRequest(id string, index uint64) error
+	GetDepositRequests(id string) (map[uint64]*StoredDepositRequest, error)
 	AddPendingTransfer(id string, tailTx Hash, bundleTrytes []Trytes, indices ...uint64) error
 	RemovePendingTransfer(id string, tailHash Hash) error
 	AddTailHash(id string, tailHash Hash, newTailTxHash Hash) error
-	GetPendingTransfers(id string) (Hashes, bundle.Bundles, error)
+	GetPendingTransfers(id string) (map[string]*PendingTransfer, error)
 }
 
 // TrytesToPendingTransfer converts the given trytes to its essence trits.

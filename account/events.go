@@ -9,60 +9,85 @@ import (
 type EventMachine interface {
 	// Emit emits the given event with the given data.
 	Emit(data interface{}, event Event)
-	// Register creates a new EventChannel listening to the given Event.
-	Register(event Event) EventChannel
-	// InternalAccountErrors returns a channel from which internal errors can be received
-	// from processes (in-/out going transfer polling, promotion/reattachment etc.).
-	InternalAccountErrors() <-chan ErrorEvent
+	// Register registers the given channel to receive values for the given event.
+	Register(channel interface{}, event Event) uint64
+	// Unregister unregisters the given channel to receive events.
+	Unregister(uint64) error
 }
 
 // an event machine not emitting anything
 type muteeventmachine struct{}
 
-func (*muteeventmachine) Emit(data interface{}, event Event)       {}
-func (*muteeventmachine) Register(event Event) EventChannel        { return nil }
-func (*muteeventmachine) InternalAccountErrors() <-chan ErrorEvent { return nil }
+func (*muteeventmachine) Emit(data interface{}, event Event)               {}
+func (*muteeventmachine) Register(channel interface{}, event Event) uint64 { return 0 }
+func (*muteeventmachine) Unregister(id uint64) error                       { return nil }
 
 func NewEventMachine() EventMachine {
 	return &eventmachine{
-		listeners: make(map[Event][]EventChannel),
-		errors:    make(chan ErrorEvent),
+		listeners: make(map[Event]map[uint64]interface{}),
 	}
 }
 
 type eventmachine struct {
 	listenersMu           sync.Mutex
-	listeners             map[Event][]EventChannel
+	listeners             map[Event]map[uint64]interface{}
+	nextID                uint64
 	firstTransferPollMade bool
-	errors                chan ErrorEvent
 }
 
 func (em *eventmachine) Emit(payload interface{}, event Event) {
-	if event == EventError {
-		em.errors <- payload.(ErrorEvent)
+	listenersMap, ok := em.listeners[event]
+	if !ok {
 		return
 	}
-
-	eventListeners := em.listeners[event]
-	for _, listener := range eventListeners {
-		select {
-		case listener.Channel() <- payload:
-		default:
+	for _, listener := range listenersMap {
+		switch lis := listener.(type) {
+		case chan bundle.Bundle:
+			select {
+			case lis <- payload.(bundle.Bundle):
+			default:
+			}
+		case chan PromotionReattachmentEvent:
+			select {
+			case lis <- payload.(PromotionReattachmentEvent):
+			default:
+			}
+		case chan ErrorEvent:
+			select {
+			case lis <- payload.(ErrorEvent):
+			default:
+			}
+		case chan struct{}:
+			select {
+			case lis <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
 
-func (em *eventmachine) Register(event Event) EventChannel {
+func (em *eventmachine) Register(channel interface{}, event Event) uint64 {
 	em.listenersMu.Lock()
-	eventListeners := em.listeners[event]
-	channel := eventchannel{make(chan interface{})}
-	em.listeners[event] = append(eventListeners, channel)
+	id := em.nextID
+	listenersMap, ok := em.listeners[event]
+	if !ok {
+		// allocate map
+		listenersMap = make(map[uint64]interface{})
+		em.listeners[event] = listenersMap
+	}
+	listenersMap[id] = channel
+	em.nextID++
 	em.listenersMu.Unlock()
-	return channel
+	return id
 }
 
-func (em *eventmachine) InternalAccountErrors() <-chan ErrorEvent {
-	return em.errors
+func (em *eventmachine) Unregister(id uint64) error {
+	em.listenersMu.Lock()
+	for _, listenersMap := range em.listeners {
+		delete(listenersMap, id)
+	}
+	em.listenersMu.Unlock()
+	return nil
 }
 
 type Event byte
@@ -88,20 +113,28 @@ const (
 	EventShutdown
 )
 
+// PromotionReattachmentEvent is emitted when a promotion or reattachment happened.
 type PromotionReattachmentEvent struct {
-	OriginTailTxHash       Hash `json:"original_tail_tx_hash"`
-	BundleHash             Hash `json:"bundle_hash"`
-	PromotionTailTxHash    Hash `json:"promotion_tail_tx_hash"`
+	// The tail tx hash of the first bundle broadcasted to the network.
+	OriginTailTxHash Hash `json:"original_tail_tx_hash"`
+	// The bundle hash of the promoted/reattached bundle.
+	BundleHash Hash `json:"bundle_hash"`
+	// The tail tx hash of the promotion transaction.
+	PromotionTailTxHash Hash `json:"promotion_tail_tx_hash"`
+	// The tail tx hash of the reattached bundle.
 	ReattachmentTailTxHash Hash `json:"reattachment_tail_tx_hash"`
 }
 
+// ErrorEvent is emitted when an internal error inside the account occurs.
 type ErrorEvent struct {
 	Type  ErrorType `json:"error_type"`
 	Error error     `json:"error"`
 }
 
+// ErrorType describes an error type
 type ErrorType byte
 
+// error event types
 const (
 	ErrorEventOutgoingTransfers ErrorType = iota
 	ErrorEventIncomingTransfers
@@ -110,123 +143,105 @@ const (
 	ErrorInternal
 )
 
-type EventChannel interface {
-	Channel() chan interface{}
-}
-
-type eventchannel struct {
-	channel chan interface{}
-}
-
-func (ec eventchannel) Channel() chan interface{} {
-	return ec.channel
-}
-
-func BundleChannel(channel EventChannel) <-chan bundle.Bundle {
-	ch := make(chan bundle.Bundle)
-	go func() {
-		for {
-			bndl, ok := <-channel.Channel()
-			if !ok {
-				return
-			}
-			ch <- bndl.(bundle.Bundle)
-		}
-	}()
-	return ch
-}
-
-func PromotionReattachmentChannel(channel EventChannel) <-chan PromotionReattachmentEvent {
-	ch := make(chan PromotionReattachmentEvent)
-	go func() {
-		for {
-			bndl, ok := <-channel.Channel()
-			if !ok {
-				return
-			}
-			ch <- bndl.(PromotionReattachmentEvent)
-		}
-	}()
-	return ch
-}
-
-func SignalChannel(channel EventChannel) <-chan struct{} {
-	ch := make(chan struct{})
-	go func() {
-		for {
-			bndl, ok := <-channel.Channel()
-			if !ok {
-				return
-			}
-			ch <- bndl.(struct{})
-		}
-	}()
-	return ch
-}
-
+// EventListener handles channels and registration for events against an EventMachine.
 type EventListener struct {
 	em               EventMachine
-	Promotion        <-chan PromotionReattachmentEvent
-	Reattachment     <-chan PromotionReattachmentEvent
-	Sending          <-chan bundle.Bundle
-	Sent             <-chan bundle.Bundle
-	ReceivingDeposit <-chan bundle.Bundle
-	ReceivedDeposit  <-chan bundle.Bundle
-	ReceivedMessage  <-chan bundle.Bundle
-	Shutdown         <-chan struct{}
+	ids              []uint64
+	idsMu            sync.Mutex
+	Promotion        chan PromotionReattachmentEvent
+	Reattachment     chan PromotionReattachmentEvent
+	Sending          chan bundle.Bundle
+	Sent             chan bundle.Bundle
+	ReceivingDeposit chan bundle.Bundle
+	ReceivedDeposit  chan bundle.Bundle
+	ReceivedMessage  chan bundle.Bundle
+	InternalError    chan ErrorEvent
+	Shutdown         chan struct{}
 }
 
 func NewEventListener(em EventMachine) *EventListener {
-	return &EventListener{em: em}
+	return &EventListener{em: em, ids: []uint64{}}
+}
+
+// Close frees up all underlying channels from the EventMachine.
+func (el *EventListener) Close() error {
+	el.idsMu.Lock()
+	el.idsMu.Unlock()
+	for _, id := range el.ids {
+		if err := el.em.Unregister(id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Promotions sets this listener up to listen for promotions.
 func (el *EventListener) Promotions() *EventListener {
-	el.Promotion = PromotionReattachmentChannel(el.em.Register(EventPromotion))
+	el.Promotion = make(chan PromotionReattachmentEvent)
+	el.ids = append(el.ids, el.em.Register(el.Promotion, EventPromotion))
 	return el
 }
 
 // Reattachments sets this listener up to listen for reattachments.
 func (el *EventListener) Reattachments() *EventListener {
-	el.Reattachment = PromotionReattachmentChannel(el.em.Register(EventReattachment))
+	el.Reattachment = make(chan PromotionReattachmentEvent)
+	el.ids = append(el.ids, el.em.Register(el.Reattachment, EventReattachment))
 	return el
 }
 
 // Sends sets this listener up to listen for sent off bundles.
 func (el *EventListener) Sends() *EventListener {
-	el.Sending = BundleChannel(el.em.Register(EventSendingTransfer))
+	el.Sending = make(chan bundle.Bundle)
+	el.ids = append(el.ids, el.em.Register(el.Sending, EventSendingTransfer))
 	return el
 }
 
 // ConfirmedSends sets this listener up to listen for sent off confirmed bundles.
 func (el *EventListener) ConfirmedSends() *EventListener {
-	el.Sent = BundleChannel(el.em.Register(EventTransferConfirmed))
+	el.Sent = make(chan bundle.Bundle)
+	el.ids = append(el.ids, el.em.Register(el.Sent, EventTransferConfirmed))
 	return el
 }
 
-// ReceivingDeposits sets this listener up to listen for sent off confirmed bundles.
+// ReceivingDeposits sets this listener up to listen for incoming deposits which are not yet confirmed.
 func (el *EventListener) ReceivingDeposits() *EventListener {
-	el.ReceivingDeposit = BundleChannel(el.em.Register(EventReceivingDeposit))
+	el.ReceivingDeposit = make(chan bundle.Bundle)
+	el.ids = append(el.ids, el.em.Register(el.ReceivingDeposit, EventReceivingDeposit))
 	return el
 }
 
+// ReceivedDeposits sets this listener up to listen for received (confirmed) deposits.
 func (el *EventListener) ReceivedDeposits() *EventListener {
-	el.ReceivedDeposit = BundleChannel(el.em.Register(EventReceivedDeposit))
+	el.ReceivedDeposit = make(chan bundle.Bundle)
+	el.ids = append(el.ids, el.em.Register(el.ReceivedDeposit, EventReceivedDeposit))
 	return el
 }
 
+// ReceivedMessages sets this listener up to listen for incoming messages.
 func (el *EventListener) ReceivedMessages() *EventListener {
-	el.ReceivedMessage = BundleChannel(el.em.Register(EventReceivedMessage))
+	el.ReceivedMessage = make(chan bundle.Bundle)
+	el.ids = append(el.ids, el.em.Register(el.ReceivedMessage, EventReceivedMessage))
 	return el
 }
 
+// Shutdowns sets this listener up to listen for shutdown messages.
+// A shutdown signal is normally only signaled once by the account on it's graceful termination.
 func (el *EventListener) Shutdowns() *EventListener {
-	el.Shutdown = SignalChannel(el.em.Register(EventShutdown))
+	el.Shutdown = make(chan struct{})
+	el.ids = append(el.ids, el.em.Register(el.Shutdown, EventShutdown))
 	return el
 }
 
+// InternalErrors sets this listener up to listen for internal account errors.
+func (el *EventListener) InternalErrors() *EventListener {
+	el.InternalError = make(chan ErrorEvent)
+	el.ids = append(el.ids, el.em.Register(el.InternalError, EventError))
+	return el
+}
+
+// All sets this listener up to listen to all account events.
 func (el *EventListener) All() *EventListener {
-	return el.Shutdowns().
+	return el.Shutdowns().InternalErrors().
 		Promotions().Reattachments().Sends().ConfirmedSends().
 		ReceivedDeposits().ReceivingDeposits().ReceivedMessages()
 }

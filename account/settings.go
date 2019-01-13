@@ -16,12 +16,15 @@ type InputSelectionStrategy func(acc *account, transferValue uint64, balanceChec
 
 // ReceiveEventFilter filters and creates events given the incoming bundles, deposit requests and spent addresses.
 // It's the job of the ReceiveEventFilter to emit the appropriate events through the given EventMachine.
-type ReceiveEventFilter func(eventMachine EventMachine, bndls bundle.Bundles, depAddrs Hashes, spentAddrs Hashes)
+type ReceiveEventFilter func(eventMachine EventMachine, bndls bundle.Bundles, depAddrs StringSet, spentAddrs StringSet)
 
 type ReceiveEventTuple struct {
 	Event  Event
 	Bundle bundle.Bundle
 }
+
+// StringSet is a set of strings.
+type StringSet map[string]struct{}
 
 // Clock defines a source of time.
 type Clock interface {
@@ -115,6 +118,8 @@ func (s *Settings) PromoteReattachInterval(seconds uint64) *Settings {
 }
 
 // The overall security level used by the account.
+// The security level must not be changed in the account's lifetime.
+// Consider creating accounts with different seeds and other security levels instead.
 func (s *Settings) SecurityLevel(level consts.SecurityLevel) *Settings {
 	s.securityLevel = level
 	return s
