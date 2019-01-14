@@ -1,6 +1,7 @@
 package account_test
 
 import (
+	"github.com/h2non/gock"
 	"github.com/iotaledger/iota.go/account/deposit"
 	"github.com/iotaledger/iota.go/account/store"
 	. "github.com/iotaledger/iota.go/api"
@@ -10,7 +11,6 @@ import (
 	"github.com/iotaledger/iota.go/trinary"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"gopkg.in/h2non/gock.v1"
 	"strings"
 	"time"
 
@@ -59,26 +59,37 @@ var _ = Describe("account", func() {
 		"LUENADZTQWWUQ9P9EXINSJJVNZLYVARHYMEY9QMNFZNF9IVMBBMKGUBSZPNMTEMMKVWTMUVLQUBHCHHHX",
 	}
 
-	var acc *account.account
+	var acc account.Account
+	var em account.EventMachine
 	var st *store.InMemoryStore
 
 	newAccount := func() {
 		st = store.NewInMemoryStore()
-		acc, err := acco
-		acc, err = account.NewAccount(seed, st, api, &account.Settings{
-			Depth: 3, MWM: 9, SecurityLevel: usedSecLvl, Clock: &fakeclock{},
-		})
+		em = account.NewEventMachine()
+		acc, err = account.NewBuilder(api, st).
+			Depth(3).
+			MWM(9).
+			SecurityLevel(usedSecLvl).
+			Clock(&fakeclock{}).
+			Seed(seed).
+			WithEvents(em).
+			Build()
 		if err != nil {
 			panic(err)
 		}
+		acc.Start()
 	}
 
 	Context("account creation", func() {
 		It("successfully creates accounts given valid parameters/options", func() {
 			var err error
-			acc, err = account.NewAccount(seed, store.NewInMemoryStore(), api, &account.Settings{
-				Depth: 3, MWM: 9, SecurityLevel: usedSecLvl,
-			})
+			acc, err = account.NewBuilder(api, store.NewInMemoryStore()).
+				Depth(3).
+				MWM(9).
+				SecurityLevel(usedSecLvl).
+				Seed(seed).
+				Build()
+			acc.Start()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(acc.IsNew()).To(BeTrue())
 		})
@@ -102,33 +113,60 @@ var _ = Describe("account", func() {
 	})
 
 	Context("Operations", func() {
-		Context("UsableBalance()", func() {
+		FContext("UsableBalance()", func() {
 			BeforeEach(newAccount)
 
-			It("returns the correct usableBalance", func() {
+			FIt("returns the correct usable balance", func() {
 				defer gock.Flush()
-				balances := []string{"10", "20", "30"}
-				for i := 0; i < 3; i++ {
-					gock.New(DefaultLocalIRIURI).
-						Post("/").
-						MatchType("json").
-						JSON(GetBalancesCommand{
-							Command:   Command{GetBalancesCmd},
-							Addresses: trinary.Hashes{addrsWC[i]},
-							Threshold: 100,
-						}).
-						Reply(200).
-						JSON(GetBalancesResponse{
-							Duration:       100,
-							Balances:       []string{balances[i]},
-							Milestone:      strings.Repeat("M", 81),
-							MilestoneIndex: 1,
-						})
-				}
+				gock.Observe(gock.DumpRequest)
+				milestoneHash := strings.Repeat("M", 81)
+				gock.New(DefaultLocalIRIURI).
+					Post("/").
+					MatchType("json").
+					JSON(GetNodeInfoCommand{Command: Command{GetNodeInfoCmd}}).
+					Reply(200).
+					JSON(GetNodeInfoResponse{
+						AppName:                            "IRI",
+						AppVersion:                         "",
+						Duration:                           100,
+						JREAvailableProcessors:             4,
+						JREFreeMemory:                      13020403,
+						JREMaxMemory:                       1241331231,
+						JRETotalMemory:                     4245234332,
+						LatestMilestone:                    milestoneHash,
+						LatestMilestoneIndex:               1,
+						LatestSolidSubtangleMilestone:      milestoneHash,
+						LatestSolidSubtangleMilestoneIndex: 1,
+						Neighbors:                          5,
+						PacketsQueueSize:                   23,
+						Time:                               213213214,
+						Tips:                               123,
+						TransactionsToRequest:              10,
+					})
+
+				gock.New(DefaultLocalIRIURI).
+					Persist().
+					Post("/").
+					MatchType("json").
+					JSON(GetBalancesCommand{
+						Command:   Command{GetBalancesCmd},
+						Addresses: addrsWC[:3],
+						Tips:      trinary.Hashes{milestoneHash},
+						Threshold: 100,
+					}).
+					Reply(200).
+					JSON(GetBalancesResponse{
+						Duration:       100,
+						Balances:       []string{"10", "20", "30"},
+						Milestone:      strings.Repeat("M", 81),
+						MilestoneIndex: 1,
+					})
+
 				t := time.Now().AddDate(0, 0, 1)
 				for i := 0; i < 3; i++ {
-					_, err := acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t})
+					conds, err := acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t})
 					Expect(err).ToNot(HaveOccurred())
+					Expect(conds.Address).To(Equal(addrs[i]))
 				}
 				balance, err := acc.UsableBalance()
 				Expect(err).ToNot(HaveOccurred())
@@ -172,7 +210,11 @@ var _ = Describe("account", func() {
 					Persist().
 					Post("/").
 					MatchType("json").
-					JSON(GetBalancesCommand{Command: Command{GetBalancesCmd}, Addresses: addrsWC[:1], Threshold: 100}).
+					JSON(GetBalancesCommand{
+						Command:   Command{GetBalancesCmd},
+						Addresses: addrsWC[:1], Threshold: 100,
+						Tips: trinary.Hashes{milestoneHash},
+					}).
 					Reply(200).
 					JSON(GetBalancesResponse{
 						Duration:       100,
@@ -229,37 +271,8 @@ var _ = Describe("account", func() {
 					JSON(BroadcastTransactionsCommand{Command: Command{BroadcastTransactionsCmd}, Trytes: powedPreparedTrytes}).
 					Reply(200)
 
-				// hypothetical deposit address given to someone and got some funds
-				t := time.Now().AddDate(0, 0, 1)
-				expectedAmount := uint64(100)
-				_, err = acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t, ExpectedAmount: &expectedAmount})
-				Expect(err).ToNot(HaveOccurred())
-
-				By("having the correct current usableBalance")
-				balance, err := acc.UsableBalance()
-				Expect(err).ToNot(HaveOccurred())
-				Expect(balance).To(Equal(uint64(100)))
-
-				By("registering an event listener for sending transfers")
-				resultBackCheck := make(chan bundle.Bundle)
-				bundleChan := account.BundleChannel(acc.RegisterEventHandler(account.EventSendingTransfer))
-
-				acc.TriggerTransferPolling()
-
-				go func() {
-					bndl := <-bundleChan
-					resultBackCheck <- bndl
-				}()
-
-				By("giving a valid target address and transfer amount")
-				bndl, err := acc.Send(account.Recipient{Address: targetAddr, Value: 100})
-				Expect(err).ToNot(HaveOccurred())
-				Expect(bndl).To(Equal(finalTxs))
-
-				bundleFromEvent := <-resultBackCheck
-				Expect(bundleFromEvent).To(Equal(finalTxs))
-
 				gock.New(DefaultLocalIRIURI).
+					Persist().
 					Post("/").
 					MatchType("json").
 					JSON(GetNodeInfoCommand{Command: Command{GetNodeInfoCmd}}).
@@ -283,6 +296,36 @@ var _ = Describe("account", func() {
 						TransactionsToRequest:              10,
 					})
 
+				// hypothetical deposit address given to someone and got some funds
+				t := time.Now().AddDate(0, 0, 1)
+				expectedAmount := uint64(100)
+				_, err = acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t, ExpectedAmount: &expectedAmount})
+				Expect(err).ToNot(HaveOccurred())
+
+				By("having the correct current usable balance")
+				balance, err := acc.UsableBalance()
+				Expect(err).ToNot(HaveOccurred())
+				Expect(balance).To(Equal(uint64(100)))
+
+				By("registering an event listener for sending transfers")
+				eventListener := account.NewEventListener(em).Sends()
+				resultBackCheck := make(chan bundle.Bundle)
+
+				acc.TriggerTransferPolling()
+
+				go func() {
+					bndl := <-eventListener.Sending
+					resultBackCheck <- bndl
+				}()
+
+				By("giving a valid target address and transfer amount")
+				bndl, err := acc.Send(account.Recipient{Address: targetAddr, Value: 100})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(bndl).To(Equal(finalTxs))
+
+				bundleFromEvent := <-resultBackCheck
+				Expect(bundleFromEvent).To(Equal(finalTxs))
+
 				gock.New(DefaultLocalIRIURI).
 					Post("/").
 					MatchType("json").
@@ -304,11 +347,13 @@ var _ = Describe("account", func() {
 				}
 
 				By("registering an event listener for confirmed sent transfers")
-				bundleChan2 := account.BundleChannel(acc.RegisterEventHandler(account.EventTransferConfirmed))
+				eventListener.ConfirmedSends()
 
-				acc.TriggerTransferPolling()
+				go func() {
+					acc.TriggerTransferPolling()
+				}()
 
-				bundleFromEvent = <-bundleChan2
+				bundleFromEvent = <-eventListener.Sent
 				Expect(bundleFromEvent[0].Bundle).To(Equal(finalTxs[0].Bundle))
 
 				state, err := st.LoadAccount(id)

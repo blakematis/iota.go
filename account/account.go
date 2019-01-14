@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"github.com/iotaledger/iota.go/account/deposit"
+	"github.com/iotaledger/iota.go/account/event"
 	"github.com/iotaledger/iota.go/account/store"
 	"github.com/iotaledger/iota.go/address"
 	"github.com/iotaledger/iota.go/api"
@@ -14,13 +15,13 @@ import (
 	"github.com/iotaledger/iota.go/transaction"
 	. "github.com/iotaledger/iota.go/trinary"
 	"github.com/pkg/errors"
-	"strings"
-	"sync"
 	"time"
 )
 
 // Account is a thread-safe object encapsulating address management, input selection, promotion and reattachments.
 type Account interface {
+	// ID returns the account's identifier.
+	ID() string
 	// Start starts the inner event loop of the account.
 	Start() error
 	// Shutdown cleanly shutdowns the account and releases its allocated resources.
@@ -40,10 +41,6 @@ type Account interface {
 	TotalBalance() (uint64, error)
 	// IsNew checks whether the account is new.
 	IsNew() (bool, error)
-	// TriggerTransferPolling awaits the current transfer polling task
-	// to finish (in case it's ongoing), pauses the task, does a manual transfer polling,
-	// resumes the transfer poll task and then returns.
-	TriggerTransferPolling()
 	// UpdateSettings updates the settings of the account in a safe and synchronized manner.
 	UpdateSettings(setts *Settings) error
 }
@@ -56,7 +53,6 @@ const (
 	actionUsableBalance
 	actionTotalBalance
 	actionIsNew
-	actionTriggerTransferPolling
 	actionUpdateComponents
 	actionShutdown
 	actionUncleanShutdown
@@ -137,6 +133,10 @@ type account struct {
 	addrBuff chan addrindextuple
 }
 
+func (acc *account) ID() string {
+	return acc.id
+}
+
 func (acc *account) Send(recipients ...Recipient) (bundle.Bundle, error) {
 	if recipients == nil || len(recipients) == 0 {
 		return nil, ErrEmptyRecipients
@@ -210,11 +210,6 @@ func (acc *account) Shutdown(dontAwaitBackgroundTasks ...bool) error {
 	return (<-acc.sendBackChan).err
 }
 
-func (acc *account) TriggerTransferPolling() {
-	acc.request <- actionrequest{Action: actionTriggerTransferPolling}
-	<-acc.sendBackChan
-}
-
 func (acc *account) UpdateSettings(setts *Settings) error {
 	acc.request <- actionrequest{Action: actionUpdateComponents, Request: setts}
 	return (<-acc.sendBackChan).err
@@ -244,6 +239,24 @@ func (acc *account) cleanup() {
 	close(acc.exit)
 }
 
+func (acc *account) startPlugins() error {
+	for _, p := range acc.setts.plugins {
+		if err := p.Start(acc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (acc *account) shutdownPlugins() error {
+	for _, p := range acc.setts.plugins {
+		if err := p.Shutdown(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (acc *account) Start() error {
 	_, err := acc.setts.store.LoadAccount(acc.id)
 	if err != nil {
@@ -269,8 +282,14 @@ func (acc *account) Start() error {
 			}
 		}()
 
-		transferPolling := acc.runTransferPolling()
-		promoterReattacher := acc.runPromoterReattacher()
+		// start up plugins
+		if err := acc.startPlugins(); err != nil {
+			acc.setts.eventMachine.Emit(err, event.EventError)
+			if err := acc.shutdownPlugins(); err != nil {
+				acc.setts.eventMachine.Emit(err, event.EventError)
+			}
+			acc.cleanup()
+		}
 
 		var cleanShutdown bool
 		var dontAwaitBackgroundTasks bool
@@ -295,23 +314,17 @@ func (acc *account) Start() error {
 					balance, err := acc.totalBalance()
 					acc.sendBackChan <- actionresponse{item: balance, err: err}
 
-				case actionTriggerTransferPolling:
-					// await current transfer polling to finish
-					transferPolling.Pause()
-					acc.pollTransfers()
-					acc.sendBackChan <- actionresponse{}
-					// continue transfer polling
-					transferPolling.Resume()
-
 				case actionIsNew:
 					state, err := acc.setts.store.LoadAccount(acc.id)
 					acc.sendBackChan <- actionresponse{item: state.IsNew(), err: err}
 
 				case actionUpdateComponents:
 
-					// await current ongoing polling goroutines to finish
-					transferPolling.Pause()
-					promoterReattacher.Pause()
+					// await all ongoing plugins to terminate
+					if err := acc.shutdownPlugins(); err != nil {
+						acc.setts.eventMachine.Emit(err, event.EventError)
+						break exit
+					}
 
 					// update the settings of the account
 					newSetts, ok := req.Request.(*Settings)
@@ -322,8 +335,10 @@ func (acc *account) Start() error {
 					}
 
 					// continue polling goroutines
-					transferPolling.Resume()
-					promoterReattacher.Resume()
+					if err := acc.startPlugins(); err != nil {
+						acc.setts.eventMachine.Emit(err, event.EventError)
+						break exit
+					}
 				case actionExecuteSync:
 					f, ok := req.Request.(syncfunc)
 					if !ok {
@@ -348,80 +363,19 @@ func (acc *account) Start() error {
 				acc.sendBackChan <- actionresponse{}
 				return
 			}
-			// await interval based goroutines to finish.
-			// Pause() will automatically return when the goroutines terminated
-			transferPolling.Pause()
-			promoterReattacher.Pause()
+			// await all plugins to shutdown
+			if err := acc.shutdownPlugins(); err != nil {
+				acc.setts.eventMachine.Emit(err, event.EventError)
+			}
+			// TODO: maybe remove select?
 			select {
 			case acc.sendBackChan <- actionresponse{}:
 			default:
 			}
-			acc.setts.eventMachine.Emit(struct{}{}, EventShutdown)
+			acc.setts.eventMachine.Emit(struct{}{}, event.EventShutdown)
 		}
 	}()
 	return nil
-}
-
-type tasksyncer chan struct{}
-
-func (ts tasksyncer) Pause() {
-	<-ts
-}
-
-func (ts tasksyncer) Resume() {
-	ts <- struct{}{}
-}
-
-func (acc *account) runPromoterReattacher() tasksyncer {
-	taskSyncer := make(tasksyncer)
-	go func() {
-	exit:
-		for {
-			select {
-			case <-time.After(acc.setts.promoteReattachInterval):
-				acc.setts.promoteReattachmentStrategy(acc)
-				select {
-				case <-acc.exit:
-					break exit
-				default:
-				}
-				// check for pause signal
-			case taskSyncer <- struct{}{}:
-				// await resume signal
-				<-taskSyncer
-			case <-acc.exit:
-				break exit
-			}
-		}
-		close(taskSyncer)
-	}()
-	return taskSyncer
-}
-
-func (acc *account) runTransferPolling() tasksyncer {
-	taskSyncer := make(tasksyncer)
-	go func() {
-	exit:
-		for {
-			select {
-			case <-time.After(acc.setts.transferPollInterval):
-				acc.pollTransfers()
-				select {
-				case <-acc.exit:
-					break exit
-				default:
-				}
-				// check pause signal
-			case taskSyncer <- struct{}{}:
-				// await resume signal
-				<-taskSyncer
-			case <-acc.exit:
-				break exit
-			}
-		}
-		close(taskSyncer)
-	}()
-	return taskSyncer
 }
 
 // AddrFunc is a function which takes in a deposit request and creates
@@ -452,16 +406,12 @@ func (acc *account) newDepositAddressGenerator() (AddrFunc, error) {
 			secLevl := acc.setts.securityLevel
 			addr, err := address.GenerateAddress(seed, index, secLevl, true)
 			if err != nil {
-				acc.setts.eventMachine.Emit(ErrorEvent{
-					Error: errors.Wrap(err, "unable to generate address in address gen. function"),
-					Type:  ErrorInternal}, EventError)
+				acc.setts.eventMachine.Emit(errors.Wrap(err, "unable to generate address in address gen. function"), event.EventError)
 				acc.executeUncleanShutdown()
 				return
 			}
 			if err := acc.setts.store.WriteIndex(acc.id, index); err != nil {
-				acc.setts.eventMachine.Emit(ErrorEvent{
-					Error: errors.Wrapf(err, "unable to store next index (%d) in the store", index),
-					Type:  ErrorInternal}, EventError)
+				acc.setts.eventMachine.Emit(errors.Wrapf(err, "unable to store next index (%d) in the store", index), event.EventError)
 				acc.executeUncleanShutdown()
 				return
 			}
@@ -582,7 +532,7 @@ func (acc *account) send(targets Recipients) (bundle.Bundle, error) {
 		return nil, err
 	}
 
-	acc.setts.eventMachine.Emit(bndl, EventSendingTransfer)
+	acc.setts.eventMachine.Emit(bndl, event.EventSendingTransfer)
 	return bndl, nil
 }
 
@@ -745,7 +695,7 @@ func defaultInputSelectionStrategy(acc *account, transferValue uint64, balanceCh
 			// and the balance is zero to free up the store
 			if balance == 0 {
 				if err := acc.setts.store.RemoveDepositRequest(acc.id, s.keyIndex); err != nil {
-					acc.setts.eventMachine.Emit(ErrorEvent{Error: err, Type: ErrorInternal}, EventError)
+					acc.setts.eventMachine.Emit(errors.Wrap(err, "unable to remove timed out address in input selection"), event.EventError)
 				}
 				continue
 			}
@@ -860,404 +810,4 @@ func (acc *account) totalBalance() (uint64, error) {
 	}
 
 	return sum, nil
-}
-
-func (acc *account) pollTransfers() {
-	pendingTransfers, err := acc.setts.store.GetPendingTransfers(acc.id)
-	if err != nil {
-		acc.setts.eventMachine.Emit(ErrorEvent{
-			Error: errors.Wrap(err, "unable to load account state for polling transfers"),
-			Type:  ErrorEventOutgoingTransfers}, EventError)
-		return
-	}
-
-	depositRequests, err := acc.setts.store.GetDepositRequests(acc.id)
-	if err != nil {
-		acc.setts.eventMachine.Emit(ErrorEvent{
-			Error: errors.Wrap(err, "unable to load account state for polling transfers"),
-			Type:  ErrorEventOutgoingTransfers}, EventError)
-		return
-	}
-
-	// poll incoming/outgoing in parallel
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		acc.checkOutgoingTransfers(pendingTransfers)
-	}()
-	go func() {
-		defer wg.Done()
-		acc.checkIncomingTransfers(depositRequests, pendingTransfers)
-	}()
-	wg.Wait()
-}
-
-func (acc *account) checkOutgoingTransfers(pendingTransfers map[string]*store.PendingTransfer) {
-	for tailTx, pendingTransfer := range pendingTransfers {
-		if len(pendingTransfer.Tails) == 0 {
-			continue
-		}
-		states, err := acc.setts.api.GetLatestInclusion(pendingTransfer.Tails)
-		if err != nil {
-			acc.setts.eventMachine.Emit(ErrorEvent{
-				Error: errors.Wrapf(err, "unable to check latest inclusion state in outgoing transfers op. (first tail tx of bundle: %s)", tailTx),
-				Type:  ErrorEventOutgoingTransfers}, EventError)
-			return
-		}
-		// if any state is true we can remove the transfer as it got confirmed
-		for i, state := range states {
-			if !state {
-				continue
-			}
-			// fetch bundle to emit it in the event
-			bndl, err := acc.setts.api.GetBundle(pendingTransfer.Tails[i])
-			if err != nil {
-				acc.setts.eventMachine.Emit(ErrorEvent{
-					Error: errors.Wrapf(err, "unable to get bundle in outgoing transfers op. (first tail tx of bundle: %s) of tail %s", tailTx, pendingTransfer.Tails[i]),
-					Type:  ErrorEventOutgoingTransfers}, EventError)
-				return
-			}
-			acc.setts.eventMachine.Emit(bndl, EventTransferConfirmed)
-			if err := acc.setts.store.RemovePendingTransfer(acc.id, tailTx); err != nil {
-				acc.setts.eventMachine.Emit(ErrorEvent{
-					Error: errors.Wrap(err, "unable to remove confirmed transfer from store in outgoing transfers op."),
-					Type:  ErrorEventOutgoingTransfers}, EventError)
-				return
-			}
-			break
-		}
-	}
-}
-
-func (acc *account) checkIncomingTransfers(depositRequests map[uint64]*store.StoredDepositRequest, pendingTransfers map[string]*store.PendingTransfer) {
-	if len(depositRequests) == 0 {
-		return
-	}
-
-	seed, err := acc.setts.seedProv.Seed()
-	if err != nil {
-		acc.setts.eventMachine.Emit(ErrorEvent{
-			Error: errors.Wrap(err, "unable to get seed from seed provider in incoming transfers op."),
-			Type:  ErrorInternal},
-			EventError)
-		return
-	}
-
-	depositAddresses := make(StringSet)
-	depAddrs := make(Hashes, len(depositRequests))
-	var i int
-	for keyIndex, req := range depositRequests {
-		addr, err := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, true)
-		if err != nil {
-			acc.setts.eventMachine.Emit(ErrorEvent{
-				Error: errors.Wrap(err, "unable to compute deposit address in incoming transfers op."),
-				Type:  ErrorEventIncomingTransfers}, EventError)
-		}
-		depAddrs[i] = addr
-		i++
-		depositAddresses[addr] = struct{}{}
-	}
-
-	spentAddresses := make(StringSet)
-	for _, transfer := range pendingTransfers {
-		bndl, err := store.PendingTransferToBundle(transfer)
-		if err != nil {
-			panic(err)
-		}
-		for j := range bndl {
-			if bndl[j].Value < 0 {
-				spentAddresses[bndl[j].Address] = struct{}{}
-			}
-		}
-	}
-
-	// get all bundles which operated on the current deposit addresses
-	bndls, err := acc.setts.api.GetBundlesFromAddresses(depAddrs, true)
-	if err != nil {
-		acc.setts.eventMachine.Emit(ErrorEvent{
-			Error: errors.Wrap(err, "unable to fetch bundles from deposit addresses in incoming transfers op."),
-			Type:  ErrorEventIncomingTransfers}, EventError)
-		return
-	}
-
-	// create the events to emit in the event system
-	acc.setts.receiveEventFilter(acc.setts.eventMachine, bndls, depositAddresses, spentAddresses)
-}
-
-const approxAboveMaxDepthMinutes = 5
-
-func aboveMaxDepth(clock Clock, ts time.Time) (bool, error) {
-	currentTime, err := clock.Now()
-	if err != nil {
-		return false, err
-	}
-	return currentTime.Sub(ts).Minutes() < approxAboveMaxDepthMinutes, nil
-}
-
-const maxDepth = 15
-const referenceToOldMsg = "reference transaction is too old"
-
-var emptySeed = strings.Repeat("9", 81)
-var ErrUnpromotableTail = errors.New("tail is unpromoteable")
-
-func defaultPromoteReattachmentStrategy(acc *account) {
-	state, err := acc.setts.store.LoadAccount(acc.id)
-	if err != nil {
-		return
-	}
-	if len(state.PendingTransfers) == 0 {
-		return
-	}
-
-	send := func(preparedBundle []Trytes, tips *api.TransactionsToApprove) (Hash, error) {
-		readyBundle, err := acc.setts.api.AttachToTangle(tips.TrunkTransaction, tips.BranchTransaction, acc.setts.mwm, preparedBundle)
-		if err != nil {
-			return "", errors.Wrap(err, "performing PoW for promote/reattach cycle bundle failed")
-		}
-		readyBundle, err = acc.setts.api.StoreAndBroadcast(readyBundle)
-		if err != nil {
-			return "", errors.Wrap(err, "unable to store/broadcast bundle in promote/reattach cycle")
-		}
-		tailTx, err := transaction.AsTransactionObject(readyBundle[0])
-		if err != nil {
-			return "", err
-		}
-		return tailTx.Hash, nil
-	}
-
-	promote := func(tailTx Hash) (Hash, error) {
-		depth := acc.setts.depth
-		for {
-			tips, err := acc.setts.api.GetTransactionsToApprove(depth, tailTx)
-			if err != nil {
-				if err.Error() == referenceToOldMsg {
-					depth++
-					if depth > maxDepth {
-						return "", ErrUnpromotableTail
-					}
-					continue
-				}
-				return "", err
-			}
-			pTransfers := bundle.Transfers{bundle.EmptyTransfer}
-			preparedBundle, err := acc.setts.api.PrepareTransfers(emptySeed, pTransfers, api.PrepareTransfersOptions{})
-			if err != nil {
-				return "", errors.Wrap(err, "unable to prepare promotion bundle")
-			}
-			return send(preparedBundle, tips)
-		}
-	}
-
-	reattach := func(essenceBndl bundle.Bundle) (Hash, error) {
-		tips, err := acc.setts.api.GetTransactionsToApprove(acc.setts.depth)
-		if err != nil {
-			return "", errors.Wrapf(err, "unable to GTTA for reattachment in promote/reattach cycle (bundle %s)", essenceBndl[0].Bundle)
-		}
-		essenceTrytes, err := transaction.TransactionsToTrytes(essenceBndl)
-		if err != nil {
-			return "", err
-		}
-		return send(essenceTrytes, tips)
-	}
-
-	storeTailTxHash := func(key string, tailTxHash string, msg string, event ErrorType) bool {
-		if err := acc.setts.store.AddTailHash(acc.id, key, tailTxHash); err != nil {
-			// might have been removed by polling goroutine
-			if err == store.ErrPendingTransferNotFound {
-				return true
-			}
-			acc.setts.eventMachine.Emit(ErrorEvent{Error: errors.Wrap(err, msg), Type: event}, EventError)
-			return false
-		}
-		return true
-	}
-
-	for key, pendingTransfer := range state.PendingTransfers {
-		// search for tail transaction which is consistent and above max depth
-		var tailToPromote string
-		// go in reverse order to start from the most recent tails
-		for i := len(pendingTransfer.Tails) - 1; i >= 0; i-- {
-			tailTx := pendingTransfer.Tails[i]
-			consistent, _, err := acc.setts.api.CheckConsistency(tailTx)
-			if err != nil {
-				continue
-			}
-
-			if !consistent {
-				continue
-			}
-
-			txTrytes, err := acc.setts.api.GetTrytes(tailTx)
-			if err != nil {
-				continue
-			}
-
-			tx, err := transaction.AsTransactionObject(txTrytes[0])
-			if err != nil {
-				continue
-			}
-
-			if above, err := aboveMaxDepth(acc.setts.clock, time.Unix(int64(tx.Timestamp), 0)); !above || err != nil {
-				continue
-			}
-
-			tailToPromote = tailTx
-			break
-		}
-
-		bndl, err := store.PendingTransferToBundle(pendingTransfer)
-		if err != nil {
-			continue
-		}
-
-		// promote as tail was found
-		if len(tailToPromote) > 0 {
-			promoteTailTxHash, err := promote(tailToPromote)
-			if err != nil {
-				acc.setts.eventMachine.Emit(ErrorEvent{Error: errors.Wrap(err, "unable to promote"), Type: ErrorPromoteTransfer}, EventError)
-				continue
-			}
-			acc.setts.eventMachine.Emit(PromotionReattachmentEvent{
-				BundleHash:          bndl[0].Bundle,
-				PromotionTailTxHash: promoteTailTxHash,
-				OriginTailTxHash:    key,
-			}, EventPromotion)
-			continue
-		}
-
-		// reattach
-		reattachTailTxHash, err := reattach(bndl)
-		if err != nil {
-			acc.setts.eventMachine.Emit(ErrorEvent{Error: errors.Wrap(err, "unable to reattach bundle"), Type: ErrorReattachTransfer}, EventError)
-			continue
-		}
-		acc.setts.eventMachine.Emit(PromotionReattachmentEvent{
-			BundleHash:             bndl[0].Bundle,
-			OriginTailTxHash:       key,
-			ReattachmentTailTxHash: reattachTailTxHash,
-		}, EventReattachment)
-		if !storeTailTxHash(key, reattachTailTxHash, "unable to store reattachment tx tail hash", ErrorReattachTransfer) {
-			continue
-		}
-		promoteTailTxHash, err := promote(reattachTailTxHash)
-		if err != nil {
-			acc.setts.eventMachine.Emit(ErrorEvent{Error: errors.Wrap(err, "unable to promote reattached bundle"), Type: ErrorPromoteTransfer}, EventError)
-			continue
-		}
-		acc.setts.eventMachine.Emit(PromotionReattachmentEvent{
-			BundleHash:          bndl[0].Bundle,
-			OriginTailTxHash:    key,
-			PromotionTailTxHash: promoteTailTxHash,
-		}, EventPromotion)
-	}
-}
-
-// PerTailFilter filters receiving/received bundles by the bundle's tail transaction hash.
-// Optionally takes in a bool flag indicating whether the first pass of the event filter
-// should not emit any events.
-func NewPerTailReceiveEventFilter(skipFirst ...bool) ReceiveEventFilter {
-	var skipFirstEmitting bool
-	if len(skipFirst) > 0 && skipFirst[0] {
-		skipFirstEmitting = true
-	}
-	receivedFilter := make(map[string]struct{})
-	receivingFilter := make(map[string]struct{})
-
-	return func(em EventMachine, bndls bundle.Bundles, ownDepAddrs StringSet, ownSpentAddrs StringSet) {
-		events := []ReceiveEventTuple{}
-
-		receivingBundles := make(map[string]bundle.Bundle)
-		receivedBundles := make(map[string]bundle.Bundle)
-
-		// filter out transfers to own remainder addresses or where
-		// a deposit is an input address (a spend from our own address)
-		for _, bndl := range bndls {
-			if err := bundle.ValidBundle(bndl); err != nil {
-				continue
-			}
-
-			isSpendFromOwnAddr := false
-			isTransferToOwnRemainderAddr := false
-
-			// filter transfers to remainder addresses by checking
-			// whether an input address is an own spent address
-			for i := range bndl {
-				if _, has := ownSpentAddrs[bndl[i].Address]; has && bndl[i].Value < 0 {
-					isTransferToOwnRemainderAddr = true
-					break
-				}
-			}
-			// filter value transfers where a deposit address is an input
-			for i := range bndl {
-				if _, has := ownDepAddrs[bndl[i].Address]; has && bndl[i].Value < 0 {
-					isSpendFromOwnAddr = true
-					break
-				}
-			}
-			if isTransferToOwnRemainderAddr || isSpendFromOwnAddr {
-				continue
-			}
-			tailTx := bundle.TailTransactionHash(bndl)
-			if *bndl[0].Persistence {
-				receivedBundles[tailTx] = bndl
-			} else {
-				receivingBundles[tailTx] = bndl
-			}
-		}
-
-		isValueTransfer := func(bndl bundle.Bundle) bool {
-			isValue := false
-			for _, tx := range bndl {
-				if tx.Value > 0 || tx.Value < 0 {
-					isValue = true
-					break
-				}
-			}
-			return isValue
-		}
-
-		// filter out bundles for which a previous event was emitted
-		// and emit new events for the new bundles
-		for tailTx, bndl := range receivingBundles {
-			if _, has := receivingFilter[tailTx]; has {
-				continue
-			}
-			receivingFilter[tailTx] = struct{}{}
-			// determine whether the bundle is a value transfer.
-			if isValueTransfer(bndl) {
-				events = append(events, ReceiveEventTuple{EventReceivingDeposit, bndl})
-				continue
-			}
-			events = append(events, ReceiveEventTuple{EventReceivedMessage, bndl})
-		}
-
-		for tailTx, bndl := range receivedBundles {
-			if _, has := receivedFilter[tailTx]; has {
-				continue
-			}
-			receivedFilter[tailTx] = struct{}{}
-			if isValueTransfer(bndl) {
-				events = append(events, ReceiveEventTuple{EventReceivedDeposit, bndl})
-				continue
-			}
-			// if a message bundle got confirmed but an event was already emitted
-			// during its receiving, we don't emit another event
-			if _, has := receivingFilter[tailTx]; has {
-				continue
-			}
-			events = append(events, ReceiveEventTuple{EventReceivedMessage, bndl})
-		}
-
-		// skip first emitting of events as multiple restarts of the same account
-		// would yield the same events.
-		if skipFirstEmitting {
-			skipFirstEmitting = false
-			return
-		}
-
-		for _, event := range events {
-			em.Emit(event.Bundle, event.Event)
-		}
-	}
 }
