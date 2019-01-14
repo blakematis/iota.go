@@ -36,6 +36,8 @@ type eventmachine struct {
 }
 
 func (em *eventmachine) Emit(payload interface{}, event Event) {
+	em.listenersMu.Lock()
+	defer em.listenersMu.Unlock()
 	listenersMap, ok := em.listeners[event]
 	if !ok {
 		return
@@ -43,25 +45,13 @@ func (em *eventmachine) Emit(payload interface{}, event Event) {
 	for _, listener := range listenersMap {
 		switch lis := listener.(type) {
 		case chan bundle.Bundle:
-			select {
-			case lis <- payload.(bundle.Bundle):
-			default:
-			}
+			lis <- payload.(bundle.Bundle)
 		case chan PromotionReattachmentEvent:
-			select {
-			case lis <- payload.(PromotionReattachmentEvent):
-			default:
-			}
+			lis <- payload.(PromotionReattachmentEvent)
 		case chan ErrorEvent:
-			select {
-			case lis <- payload.(ErrorEvent):
-			default:
-			}
+			lis <- payload.(ErrorEvent)
 		case chan struct{}:
-			select {
-			case lis <- struct{}{}:
-			default:
-			}
+			lis <- struct{}{}
 		}
 	}
 }
@@ -144,6 +134,8 @@ const (
 )
 
 // EventListener handles channels and registration for events against an EventMachine.
+// Use the builder methods to set this channel to listen to certain events.
+// Once registered for events, you must listen for incoming events on the specific channel.
 type EventListener struct {
 	em               EventMachine
 	ids              []uint64
@@ -166,7 +158,7 @@ func NewEventListener(em EventMachine) *EventListener {
 // Close frees up all underlying channels from the EventMachine.
 func (el *EventListener) Close() error {
 	el.idsMu.Lock()
-	el.idsMu.Unlock()
+	defer el.idsMu.Unlock()
 	for _, id := range el.ids {
 		if err := el.em.Unregister(id); err != nil {
 			return err

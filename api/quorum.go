@@ -388,20 +388,6 @@ func (s *subtanglecheck) add(data []byte, node *string) error {
 	return nil
 }
 
-type sortedbytes []byte
-
-func (b sortedbytes) Len() int {
-	return len(b)
-}
-
-func (b sortedbytes) Less(i, j int) bool {
-	return b[i] < b[j]
-}
-
-func (b sortedbytes) Swap(i, j int) {
-	b[j], b[i] = b[i], b[j]
-}
-
 // ignore
 func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	comm, ok := cmd.(Commander)

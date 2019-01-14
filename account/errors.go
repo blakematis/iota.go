@@ -25,3 +25,4 @@ func (err ErrAccountPanic) Error() string {
 
 var ErrTimeoutNotSpecified = errors.New("deposit requests must have a timeout")
 var ErrTimeoutTooLow = errors.New("deposit requests must at least have a timeout of >2 minutes")
+var ErrAddrGeneratorStopped = errors.New("address generator goroutine is stopped")

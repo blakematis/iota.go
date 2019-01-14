@@ -59,6 +59,7 @@ const (
 	actionTriggerTransferPolling
 	actionUpdateComponents
 	actionShutdown
+	actionUncleanShutdown
 	actionExecuteSync
 )
 
@@ -201,7 +202,11 @@ func (acc *account) IsNew() (bool, error) {
 }
 
 func (acc *account) Shutdown(dontAwaitBackgroundTasks ...bool) error {
-	acc.request <- actionrequest{Action: actionShutdown, Request: dontAwaitBackgroundTasks}
+	var await bool
+	if len(dontAwaitBackgroundTasks) > 0 && dontAwaitBackgroundTasks[0] {
+		await = true
+	}
+	acc.request <- actionrequest{Action: actionShutdown, Request: await}
 	return (<-acc.sendBackChan).err
 }
 
@@ -222,6 +227,13 @@ type syncfunc func() error
 func (acc *account) executeSync(f syncfunc) error {
 	acc.request <- actionrequest{Action: actionExecuteSync, Request: f}
 	return (<-acc.sendBackChan).err
+}
+
+// induces an unclean shutdown. this is mainly used to shutdown the account
+// in case an inner goroutine can't commence its work and thereby hinders
+// the account to function properly.
+func (acc *account) executeUncleanShutdown() {
+	acc.request <- actionrequest{Action: actionUncleanShutdown}
 }
 
 func (acc *account) sendError(err error) {
@@ -272,8 +284,8 @@ func (acc *account) Start() error {
 					acc.sendBackChan <- actionresponse{item: bndl, err: err}
 
 				case actionNewDepositAddress:
-					depReq := req.Request.(*deposit.Request)
-					acc.sendBackChan <- actionresponse{item: acc.addrFunc(depReq)}
+					addr, err := acc.addrFunc(req.Request.(*deposit.Request))
+					acc.sendBackChan <- actionresponse{item: addr, err: err}
 
 				case actionUsableBalance:
 					balance, err := acc.usableBalance()
@@ -318,6 +330,9 @@ func (acc *account) Start() error {
 						continue
 					}
 					acc.sendBackChan <- actionresponse{err: f()}
+				case actionUncleanShutdown:
+					acc.cleanup()
+					break exit
 				case actionShutdown:
 					acc.cleanup()
 					dontAwaitBackgroundTasks = req.Request.(bool)
@@ -337,7 +352,10 @@ func (acc *account) Start() error {
 			// Pause() will automatically return when the goroutines terminated
 			transferPolling.Pause()
 			promoterReattacher.Pause()
-			acc.sendBackChan <- actionresponse{}
+			select {
+			case acc.sendBackChan <- actionresponse{}:
+			default:
+			}
 			acc.setts.eventMachine.Emit(struct{}{}, EventShutdown)
 		}
 	}()
@@ -409,7 +427,7 @@ func (acc *account) runTransferPolling() tasksyncer {
 // AddrFunc is a function which takes in a deposit request and creates
 // an object describing the conditions for the deposit.
 // An AddrFunc is not thread-safe.
-type AddrFunc func(dep *deposit.Request) *deposit.Conditions
+type AddrFunc func(dep *deposit.Request) (*deposit.Conditions, error)
 
 func (acc *account) newDepositAddressGenerator() (AddrFunc, error) {
 	state, err := acc.setts.store.LoadAccount(acc.id)
@@ -422,17 +440,30 @@ func (acc *account) newDepositAddressGenerator() (AddrFunc, error) {
 		return nil, err
 	}
 
+	addrGenStopped := make(chan struct{})
+
 	// generating N addresses ahead into the buffer
 	go func() {
+		defer func() {
+			close(addrGenStopped)
+		}()
 		for index := state.KeyIndex + 1; ; index++ {
 			// copy
 			secLevl := acc.setts.securityLevel
 			addr, err := address.GenerateAddress(seed, index, secLevl, true)
 			if err != nil {
-				panic(err)
+				acc.setts.eventMachine.Emit(ErrorEvent{
+					Error: errors.Wrap(err, "unable to generate address in address gen. function"),
+					Type:  ErrorInternal}, EventError)
+				acc.executeUncleanShutdown()
+				return
 			}
 			if err := acc.setts.store.WriteIndex(acc.id, index); err != nil {
-				panic(err)
+				acc.setts.eventMachine.Emit(ErrorEvent{
+					Error: errors.Wrapf(err, "unable to store next index (%d) in the store", index),
+					Type:  ErrorInternal}, EventError)
+				acc.executeUncleanShutdown()
+				return
 			}
 			select {
 			case acc.addrBuff <- addrindextuple{addr, index, secLevl}:
@@ -442,26 +473,31 @@ func (acc *account) newDepositAddressGenerator() (AddrFunc, error) {
 		}
 	}()
 
-	return func(req *deposit.Request) *deposit.Conditions {
-		tuple := <-acc.addrBuff
-		// the address generation goroutine might have created addresses
-		// into the channel which are not of the current desired security level because
-		// it's not synchronized with settings updates.
-		// lets simply skip addresses which do not fulfill the currently set security level.
-		// note that the security level can't be changed in the meantime inside this check as settings updates
-		// happen in a synchronized fashion inside the action processing event loop.
-		for {
-			if tuple.securityLevel != acc.setts.securityLevel {
-				tuple = <-acc.addrBuff
-				continue
+	return func(req *deposit.Request) (*deposit.Conditions, error) {
+		select {
+		case <-addrGenStopped:
+			return nil, ErrAddrGeneratorStopped
+		case tuple := <-acc.addrBuff:
+			// the address generation goroutine might have created addresses
+			// into the channel which are not of the current desired security level because
+			// it's not synchronized with settings updates.
+			// lets simply skip addresses which do not fulfill the currently set security level.
+			// note that the security level can't be changed in the meantime inside this check as settings updates
+			// happen in a synchronized fashion inside the action processing event loop.
+			for {
+				if tuple.securityLevel != acc.setts.securityLevel {
+					tuple = <-acc.addrBuff
+					continue
+				}
+				break
 			}
-			break
+			storedReq := &store.StoredDepositRequest{SecurityLevel: tuple.securityLevel, Request: *req}
+			if err := acc.setts.store.AddDepositRequest(acc.id, tuple.index, storedReq); err != nil {
+				return nil, err
+			}
+			return &deposit.Conditions{Address: tuple.addr, Request: *req}, nil
 		}
-		storedReq := &store.StoredDepositRequest{SecurityLevel: tuple.securityLevel, Request: *req}
-		if err := acc.setts.store.AddDepositRequest(acc.id, tuple.index, storedReq); err != nil {
-			panic(ErrMarkDepositAddr{err})
-		}
-		return &deposit.Conditions{Address: tuple.addr, Request: *req}
+
 	}, nil
 }
 
@@ -485,7 +521,10 @@ func (acc *account) send(targets Recipients) (bundle.Bundle, error) {
 		// store and add remainder address to transfer
 		if sum > transferSum {
 			remainder := sum - transferSum
-			depCond := acc.addrFunc(&deposit.Request{ExpectedAmount: &remainder})
+			depCond, err := acc.addrFunc(&deposit.Request{ExpectedAmount: &remainder})
+			if err != nil {
+				return nil, errors.Wrap(err, "unable to generate remainder address in send op.")
+			}
 			remainderAddress = &depCond.Address
 		}
 	}
@@ -1182,7 +1221,6 @@ func NewPerTailReceiveEventFilter(skipFirst ...bool) ReceiveEventFilter {
 		// and emit new events for the new bundles
 		for tailTx, bndl := range receivingBundles {
 			if _, has := receivingFilter[tailTx]; has {
-				delete(receivingBundles, tailTx)
 				continue
 			}
 			receivingFilter[tailTx] = struct{}{}
@@ -1196,12 +1234,16 @@ func NewPerTailReceiveEventFilter(skipFirst ...bool) ReceiveEventFilter {
 
 		for tailTx, bndl := range receivedBundles {
 			if _, has := receivedFilter[tailTx]; has {
-				delete(receivedBundles, tailTx)
 				continue
 			}
 			receivedFilter[tailTx] = struct{}{}
 			if isValueTransfer(bndl) {
 				events = append(events, ReceiveEventTuple{EventReceivedDeposit, bndl})
+				continue
+			}
+			// if a message bundle got confirmed but an event was already emitted
+			// during its receiving, we don't emit another event
+			if _, has := receivingFilter[tailTx]; has {
 				continue
 			}
 			events = append(events, ReceiveEventTuple{EventReceivedMessage, bndl})
