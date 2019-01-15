@@ -5,6 +5,7 @@ import (
 	"github.com/iotaledger/iota.go/account/deposit"
 	"github.com/iotaledger/iota.go/bundle"
 	"github.com/iotaledger/iota.go/consts"
+	"github.com/iotaledger/iota.go/guards"
 	"github.com/iotaledger/iota.go/transaction"
 	. "github.com/iotaledger/iota.go/trinary"
 	"github.com/pkg/errors"
@@ -73,8 +74,14 @@ type Store interface {
 func TrytesToPendingTransfer(trytes []Trytes) PendingTransfer {
 	essences := make([]Trits, len(trytes))
 	for i := 0; i < len(trytes); i++ {
+		// if the transaction has a non empty signature message fragment, we store it in the store
+		storeSigMsgFrag := !guards.IsEmptyTrytes(trytes[i][:consts.AddressTrinaryOffset/3])
 		txTrits := MustTrytesToTrits(trytes[i])
-		essences[i] = txTrits[:consts.BundleTrinaryOffset]
+		if storeSigMsgFrag {
+			essences[i] = txTrits[:consts.BundleTrinaryOffset]
+		} else {
+			essences[i] = txTrits[consts.AddressTrinaryOffset:consts.BundleTrinaryOffset]
+		}
 	}
 	return PendingTransfer{Bundle: essences, Tails: Hashes{}}
 }
@@ -88,6 +95,11 @@ func PendingTransferToBundle(pt *PendingTransfer) (bundle.Bundle, error) {
 		// add empty trits for fields after the last index
 		emptyTxSuffix := PadTrits(Trits{}, consts.TransactionTrinarySize-consts.BundleTrinaryOffset)
 		txTrits := append(essenceTrits, emptyTxSuffix...)
+		// add an empty signature message fragment if non was stored
+		if len(txTrits) != consts.TransactionTrinarySize {
+			emptySignFrag := PadTrits(Trits{}, consts.SignatureMessageFragmentTrinarySize)
+			txTrits = append(emptySignFrag, txTrits...)
+		}
 		tx, err := transaction.ParseTransaction(txTrits, true)
 		if err != nil {
 			return nil, err
