@@ -74,7 +74,7 @@ func TrytesToPendingTransfer(trytes []Trytes) PendingTransfer {
 	essences := make([]Trits, len(trytes))
 	for i := 0; i < len(trytes); i++ {
 		txTrits := MustTrytesToTrits(trytes[i])
-		essences[i] = txTrits[consts.AddressTrinaryOffset:consts.BundleTrinaryOffset]
+		essences[i] = txTrits[:consts.BundleTrinaryOffset]
 	}
 	return PendingTransfer{Bundle: essences, Tails: Hashes{}}
 }
@@ -88,8 +88,6 @@ func PendingTransferToBundle(pt *PendingTransfer) (bundle.Bundle, error) {
 		// add empty trits for fields after the last index
 		emptyTxSuffix := PadTrits(Trits{}, consts.TransactionTrinarySize-consts.BundleTrinaryOffset)
 		txTrits := append(essenceTrits, emptyTxSuffix...)
-		emptySignFrag := PadTrits(Trits{}, consts.SignatureMessageFragmentTrinarySize)
-		txTrits = append(emptySignFrag, txTrits...)
 		tx, err := transaction.ParseTransaction(txTrits, true)
 		if err != nil {
 			return nil, err
