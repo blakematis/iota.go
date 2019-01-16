@@ -565,15 +565,9 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 	result := quorumCheck.votes[selected].data
 
 	if statusCode != http.StatusOK {
-		errResp := &ErrorResponse{}
-		err = json.Unmarshal(result, errResp)
-		return handleError(errResp, err, errors.Wrapf(ErrNonOKStatusCodeFromAPIRequest, "http code %d", statusCode))
-	}
-
-	if bytes.Contains(result, []byte(`"error"`)) || bytes.Contains(result, []byte(`"exception"`)) {
-		errResp := &ErrorResponse{}
-		err = json.Unmarshal(result, errResp)
-		return handleError(errResp, err, ErrUnknownErrorFromAPIRequest)
+		errResp := &ErrRequestError{Code: statusCode}
+		json.Unmarshal(result, errResp)
+		return errResp
 	}
 
 	if out == nil {
