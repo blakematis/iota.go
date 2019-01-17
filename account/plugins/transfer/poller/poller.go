@@ -185,7 +185,7 @@ func (tp *TransferPoller) checkIncomingTransfers(depositRequests map[uint64]*sto
 	depAddrs := make(Hashes, len(depositRequests))
 	var i int
 	for keyIndex, req := range depositRequests {
-		addr, err := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, true)
+		addr, err := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, false)
 		if err != nil {
 			tp.em.Emit(errors.Wrap(err, "unable to compute deposit address in incoming transfers op."), event.EventError)
 			return

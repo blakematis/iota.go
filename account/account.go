@@ -601,7 +601,7 @@ func defaultInputSelectionStrategy(acc *account, transferValue uint64, balanceCh
 			if req.ExpectedAmount == nil {
 				panic("remainder address in system without 'expected amount'")
 			}
-			addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, true)
+			addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, false)
 			primaryAddrs = append(primaryAddrs, addr)
 			selections = append(selections, selection{keyIndex, req})
 			continue
@@ -620,14 +620,14 @@ func defaultInputSelectionStrategy(acc *account, transferValue uint64, balanceCh
 			if req.ExpectedAmount == nil {
 				continue
 			}
-			addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, true)
+			addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, false)
 			primaryAddrs = append(primaryAddrs, addr)
 			selections = append(selections, selection{keyIndex, req})
 			continue
 		}
 
 		// single
-		addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, true)
+		addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, false)
 		primaryAddrs = append(primaryAddrs, addr)
 		selections = append(selections, selection{keyIndex, req})
 	}
@@ -677,7 +677,7 @@ func defaultInputSelectionStrategy(acc *account, transferValue uint64, balanceCh
 	if sum < transferValue || balanceCheck {
 		for i := range timedOutAddrs {
 			s := &timedOutAddrs[i]
-			addr, _ := address.GenerateAddress(seed, s.keyIndex, s.req.SecurityLevel, true)
+			addr, _ := address.GenerateAddress(seed, s.keyIndex, s.req.SecurityLevel, false)
 
 			// check whether the timed out address has an incoming consistent value transfer,
 			// and if so, don't use it in the input selection
@@ -795,7 +795,7 @@ func (acc *account) totalBalance() (uint64, error) {
 	addrs := make(Hashes, len(state.DepositRequests))
 	var i int
 	for keyIndex, req := range state.DepositRequests {
-		addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, true)
+		addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, false)
 		addrs[i] = addr
 		i++
 	}
