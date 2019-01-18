@@ -44,7 +44,7 @@ func NewPromoter(
 		eventMachine = &event.DiscardEventMachine{}
 	}
 	return &Promoter{
-		interval: interval, em: eventMachine,
+		interval: interval, em: eventMachine, clock: clock,
 		api: api, store: store, depth: depth, mwm: mwm,
 		syncer: make(chan struct{}), shutdown: make(chan struct{}),
 	}
@@ -58,7 +58,7 @@ type Promoter struct {
 	clock    account.Clock
 	depth    uint64
 	mwm      uint64
-	acc account.Account
+	acc      account.Account
 	syncer   chan struct{}
 	shutdown chan struct{}
 }

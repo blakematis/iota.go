@@ -40,7 +40,10 @@ func NewTransferPoller(
 	}
 	return &TransferPoller{
 		api: api, store: store, interval: interval,
-		receiveEventfilter: receiveEventFilter, em: eventMachine, seedProvider: seedProv,
+		receiveEventfilter: receiveEventFilter,
+		em:                 eventMachine, seedProvider: seedProv,
+		shutdown: make(chan struct{}),
+		syncer:   make(chan struct{}),
 	}
 }
 
@@ -89,20 +92,20 @@ func (tp *TransferPoller) ManuelPoll() error {
 		return nil
 	}
 	// await current polling to finish if any
-	if err := tp.Pause(); err != nil {
+	if err := tp.pause(); err != nil {
 		return err
 	}
-	defer tp.Resume()
+	defer tp.resume()
 	tp.pollTransfers()
 	return nil
 }
 
-func (tp *TransferPoller) Pause() error {
+func (tp *TransferPoller) pause() error {
 	<-tp.syncer
 	return nil
 }
 
-func (tp *TransferPoller) Resume() error {
+func (tp *TransferPoller) resume() error {
 	tp.syncer <- struct{}{}
 	return nil
 }

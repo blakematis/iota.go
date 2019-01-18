@@ -59,9 +59,11 @@ var _ = Describe("BadgerDB", func() {
 
 	Context("GetPendingTransfers()", func() {
 		It("returns all pending transfers", func() {
-			_, bndls, err := st.GetPendingTransfers(id)
+			pendingTransfers, err := st.GetPendingTransfers(id)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(bndls[0][0].Address).To(Equal(tx.Address))
+			bndl, err := store.PendingTransferToBundle(pendingTransfers[tx.Hash])
+			Expect(err).ToNot(HaveOccurred())
+			Expect(bndl[0].Address).To(Equal(tx.Address))
 		})
 	})
 
@@ -80,9 +82,9 @@ var _ = Describe("BadgerDB", func() {
 		It("removes the given transfer", func() {
 			err := st.RemovePendingTransfer(id, tx.Hash)
 			Expect(err).ToNot(HaveOccurred())
-			_, bndls, err := st.GetPendingTransfers(id)
+			pendingTransfers, err := st.GetPendingTransfers(id)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(len(bndls)).To(Equal(0))
+			Expect(len(pendingTransfers)).To(Equal(0))
 		})
 	})
 })

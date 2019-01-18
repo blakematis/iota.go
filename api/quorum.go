@@ -211,6 +211,8 @@ var nonQuorumCommands = map[IRICommand]struct{}{
 var subMileHashKey = [30]byte{34, 108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101}
 var subMileIndexKey = [34]byte{108, 97, 116, 101, 115, 116, 83, 111, 108, 105, 100, 83, 117, 98, 116, 97, 110, 103, 108, 101, 77, 105, 108, 101, 115, 116, 111, 110, 101, 73, 110, 100, 101, 120}
 var durationKey = [11]byte{34, 100, 117, 114, 97, 116, 105, 111, 110, 34, 58}
+var infoKey = [7]byte{34, 105, 110, 102, 111, 34, 58}
+var emptyInfoKey = [9]byte{34, 105, 110, 102, 111, 34, 58, 34, 34}
 
 const (
 	commaAscii             = 44
@@ -314,15 +316,35 @@ func (hc *quorumhttpclient) injectDefault(cmd interface{}, out interface{}) bool
 	return false
 }
 
-// removes the duration value from the response
-// as multiple nodes will always return a different one
-func removeDurationField(data []byte) []byte {
+// slices out a byte slice without the duration field.
+// querying multiple nodes will always lead to different durations
+// and hence must be removed when hasing the entire response.
+func sliceOutDurationField(data []byte) []byte {
 	indexOfDurationField := bytes.LastIndex(data, durationKey[:])
 	if indexOfDurationField == -1 {
 		return data
 	}
 	curlyBraceIndex := bytes.Index(data[indexOfDurationField:], []byte{closingCurlyBraceAscii})
 	return append(data[:indexOfDurationField-1], data[indexOfDurationField+curlyBraceIndex:]...)
+}
+
+// slices out a byte slice without the info field of check consistency calls.
+// querying multiple nodes will lead to different info messages when the state
+// is false of the responses.
+func sliceOutInfoField(data []byte) []byte {
+	infoIndex := bytes.LastIndex(data, infoKey[:])
+	if infoIndex == -1 {
+		return data
+	}
+	// if the info field is empty, don't create a copy
+	if i := bytes.LastIndex(data, emptyInfoKey[:]); i != -1 {
+		return data
+	}
+	// create a copy as we want to keep the schematics
+	// of the original slice
+	c := make([]byte, len(data))
+	copy(c, data)
+	return append(c[:infoIndex-1], closingCurlyBraceAscii)
 }
 
 type quorumcheck struct {
@@ -489,14 +511,15 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 
 			// remove the duration field from the response
 			// as multiple nodes will always give a different answer
-			data = removeDurationField(data)
+			data = sliceOutDurationField(data)
 
 			var hash uint64
 
-			// as findTransactions responses don't guarantee ordering, we just simply
-			// sum up the bytes of the reduced response. it's highly unlikely that responses
-			// with different hashes will sum up to the same number.
-			if _, isFindTransactions := cmd.(*FindTransactionsCommand); isFindTransactions {
+			switch cmd.(type) {
+			case *FindTransactionsCommand:
+				// as findTransactions responses don't guarantee ordering, we just simply
+				// sum up the bytes of the reduced response. it's highly unlikely that responses
+				// with different hashes will sum up to the same number.
 				var sum uint64
 				for _, b := range data {
 					sum += uint64(b)
@@ -505,7 +528,13 @@ func (hc *quorumhttpclient) Send(cmd interface{}, out interface{}) error {
 				// distancing responses with different lengths
 				sum *= uint64(len(data))
 				hash = sum
-			} else {
+			case *CheckConsistencyCommand:
+				// we slice out the info field from check consistency calls
+				// but use whatever first info response was given when actually
+				// returning the result from this API call
+				cleaned := sliceOutInfoField(data)
+				hash = xxhash.Sum64(cleaned)
+			default:
 				hash = xxhash.Sum64(data)
 			}
 			// add quorum vote

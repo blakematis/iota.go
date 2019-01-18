@@ -3,6 +3,9 @@ package account_test
 import (
 	"github.com/h2non/gock"
 	"github.com/iotaledger/iota.go/account/deposit"
+	"github.com/iotaledger/iota.go/account/event"
+	"github.com/iotaledger/iota.go/account/event/listener"
+	"github.com/iotaledger/iota.go/account/plugins/transfer/poller"
 	"github.com/iotaledger/iota.go/account/store"
 	. "github.com/iotaledger/iota.go/api"
 	"github.com/iotaledger/iota.go/bundle"
@@ -60,18 +63,23 @@ var _ = Describe("account", func() {
 	}
 
 	var acc account.Account
-	var em account.EventMachine
+	var em event.EventMachine
+	var poll *poller.TransferPoller
 	var st *store.InMemoryStore
 
 	newAccount := func() {
 		st = store.NewInMemoryStore()
-		em = account.NewEventMachine()
-		acc, err = account.NewBuilder(api, st).
+		em = event.NewEventMachine()
+		poll = poller.NewTransferPoller(
+			api, st, em,
+			account.NewInMemorySeedProvider(seed), poller.NewPerTailReceiveEventFilter(), time.Duration(60)*time.Second)
+		acc, err = account.New(api, st).
 			Depth(3).
 			MWM(9).
 			SecurityLevel(usedSecLvl).
 			Clock(&fakeclock{}).
 			Seed(seed).
+			With(poll).
 			WithEvents(em).
 			Build()
 		if err != nil {
@@ -83,7 +91,7 @@ var _ = Describe("account", func() {
 	Context("account creation", func() {
 		It("successfully creates accounts given valid parameters/options", func() {
 			var err error
-			acc, err = account.NewBuilder(api, store.NewInMemoryStore()).
+			acc, err = account.New(api, store.NewInMemoryStore()).
 				Depth(3).
 				MWM(9).
 				SecurityLevel(usedSecLvl).
@@ -104,7 +112,7 @@ var _ = Describe("account", func() {
 			It("should return the correct address", func() {
 				for _, compareAddr := range addrs {
 					t := time.Now().AddDate(0, 0, 1)
-					depositAddr, err := acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t})
+					depositAddr, err := acc.AllocateDepositRequest(&deposit.Request{TimeoutOn: &t})
 					Expect(err).ToNot(HaveOccurred())
 					Expect(depositAddr.Address).To(Equal(compareAddr))
 				}
@@ -164,7 +172,7 @@ var _ = Describe("account", func() {
 
 				t := time.Now().AddDate(0, 0, 1)
 				for i := 0; i < 3; i++ {
-					conds, err := acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t})
+					conds, err := acc.AllocateDepositRequest(&deposit.Request{TimeoutOn: &t})
 					Expect(err).ToNot(HaveOccurred())
 					Expect(conds.Address).To(Equal(addrs[i]))
 				}
@@ -299,7 +307,7 @@ var _ = Describe("account", func() {
 				// hypothetical deposit address given to someone and got some funds
 				t := time.Now().AddDate(0, 0, 1)
 				expectedAmount := uint64(100)
-				_, err = acc.NewDepositRequest(&deposit.Request{TimeoutOn: &t, ExpectedAmount: &expectedAmount})
+				_, err = acc.AllocateDepositRequest(&deposit.Request{TimeoutOn: &t, ExpectedAmount: &expectedAmount})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("having the correct current usable balance")
@@ -308,10 +316,10 @@ var _ = Describe("account", func() {
 				Expect(balance).To(Equal(uint64(100)))
 
 				By("registering an event listener for sending transfers")
-				eventListener := account.NewEventListener(em).Sends()
+				eventListener := listener.NewEventListener(em).Sends()
 				resultBackCheck := make(chan bundle.Bundle)
 
-				acc.TriggerTransferPolling()
+				poll.ManuelPoll()
 
 				go func() {
 					bndl := <-eventListener.Sending
@@ -350,7 +358,7 @@ var _ = Describe("account", func() {
 				eventListener.ConfirmedSends()
 
 				go func() {
-					acc.TriggerTransferPolling()
+					poll.ManuelPoll()
 				}()
 
 				bundleFromEvent = <-eventListener.Sent

@@ -9,19 +9,16 @@ import (
 	"time"
 )
 
-// InputSelectionStrategy defines a function which given the account, transfer value and the flag balance check,
+// InputSelectionFunc defines a function which given the account, transfer value and the flag balance check,
 // computes the inputs for fulfilling the transfer or the usable balance of the account.
-// The InputSelectionStrategy must obey to the rules of deposit conditions to ensure consistency.
-type InputSelectionStrategy func(acc *account, transferValue uint64, balanceCheck bool) (uint64, []api.Input, []uint64, error)
+// The InputSelectionFunc must obey to the rules of conditional deposit requests to ensure consistency.
+// It returns the computed balance/transfer value, inputs and the key indices to remove from the store.
+type InputSelectionFunc func(acc *account, transferValue uint64, balanceCheck bool) (uint64, []api.Input, []uint64, error)
 
 // Clock defines a source of time.
 type Clock interface {
 	Now() (time.Time, error)
 }
-
-// PromotionReattachmentStrategy defines a function which given the account, tries to promote or reattach
-// pending transfers of the account.
-type PromotionReattachmentStrategy func(acc *account)
 
 type systemclock struct{}
 
@@ -42,7 +39,7 @@ type Settings struct {
 	depth                  uint64
 	securityLevel          consts.SecurityLevel
 	clock                  Clock
-	inputSelectionStrategy InputSelectionStrategy
+	inputSelectionStrategy InputSelectionFunc
 	eventMachine           event.EventMachine
 	plugins                []Plugin
 }
@@ -103,8 +100,8 @@ func (s *Settings) Clock(clock Clock) *Settings {
 	return s
 }
 
-// InputSelectionStrategy sets the strategy to determine inputs and usable balance.
-func (s *Settings) InputSelectionStrategy(strat InputSelectionStrategy) *Settings {
+// InputSelectionFunc sets the strategy to determine inputs and usable balance.
+func (s *Settings) InputSelectionStrategy(strat InputSelectionFunc) *Settings {
 	s.inputSelectionStrategy = strat
 	return s
 }
@@ -126,7 +123,7 @@ func defaultSettings(setts ...*Settings) *Settings {
 		return &Settings{
 			mwm: 14, depth: 3, securityLevel: consts.SecurityLevelMedium,
 			clock:                  &systemclock{},
-			inputSelectionStrategy: defaultInputSelectionStrategy,
+			inputSelectionStrategy: defaultInputSelection,
 			eventMachine:           &event.DiscardEventMachine{},
 		}
 	}
@@ -146,7 +143,7 @@ func defaultSettings(setts ...*Settings) *Settings {
 		opt.clock = &systemclock{}
 	}
 	if opt.inputSelectionStrategy == nil {
-		opt.inputSelectionStrategy = defaultInputSelectionStrategy
+		opt.inputSelectionStrategy = defaultInputSelection
 	}
 	return opt
 }
