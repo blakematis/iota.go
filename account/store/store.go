@@ -34,10 +34,10 @@ func (state *AccountState) IsNew() bool {
 }
 
 // PendingTransfer defines a pending transfer in the store which is made up of the bundle's
-// essence trits and tail hashes of reattachments.
+// essence trytes and tail hashes of reattachments.
 type PendingTransfer struct {
-	Bundle []Trits `json:"bundle" bson:"bundle"`
-	Tails  Hashes  `json:"tails" bson:"tails"`
+	Bundle []Trytes `json:"bundle" bson:"bundle"`
+	Tails  Hashes   `json:"tails" bson:"tails"`
 }
 
 // StoredDepositRequest defines a stored deposit request.
@@ -72,15 +72,14 @@ type Store interface {
 
 // TrytesToPendingTransfer converts the given trytes to its essence trits.
 func TrytesToPendingTransfer(trytes []Trytes) PendingTransfer {
-	essences := make([]Trits, len(trytes))
+	essences := make([]Trytes, len(trytes))
 	for i := 0; i < len(trytes); i++ {
 		// if the transaction has a non empty signature message fragment, we store it in the store
 		storeSigMsgFrag := !guards.IsEmptyTrytes(trytes[i][:consts.AddressTrinaryOffset/3])
-		txTrits := MustTrytesToTrits(trytes[i])
 		if storeSigMsgFrag {
-			essences[i] = txTrits[:consts.BundleTrinaryOffset]
+			essences[i] = trytes[i][:consts.BundleTrinaryOffset/3]
 		} else {
-			essences[i] = txTrits[consts.AddressTrinaryOffset:consts.BundleTrinaryOffset]
+			essences[i] = trytes[i][consts.AddressTrinaryOffset/3 : consts.BundleTrinaryOffset/3]
 		}
 	}
 	return PendingTransfer{Bundle: essences, Tails: Hashes{}}
@@ -91,16 +90,14 @@ func PendingTransferToBundle(pt *PendingTransfer) (bundle.Bundle, error) {
 	bndl := make(bundle.Bundle, len(pt.Bundle))
 	in := 0
 	for i := 0; i < len(bndl); i++ {
-		essenceTrits := pt.Bundle[i]
+		essenceTrytes := pt.Bundle[i]
 		// add empty trits for fields after the last index
-		emptyTxSuffix := PadTrits(Trits{}, consts.TransactionTrinarySize-consts.BundleTrinaryOffset)
-		txTrits := append(essenceTrits, emptyTxSuffix...)
+		txTrytes := essenceTrytes + Pad("", (consts.TransactionTrinarySize-consts.BundleTrinaryOffset)/3)
 		// add an empty signature message fragment if non was stored
-		if len(txTrits) != consts.TransactionTrinarySize {
-			emptySignFrag := PadTrits(Trits{}, consts.SignatureMessageFragmentTrinarySize)
-			txTrits = append(emptySignFrag, txTrits...)
+		if len(txTrytes) != consts.TransactionTrinarySize/3 {
+			txTrytes = Pad("", consts.SignatureMessageFragmentTrinarySize/3) + txTrytes
 		}
-		tx, err := transaction.ParseTransaction(txTrits, true)
+		tx, err := transaction.ParseTransaction(MustTrytesToTrits(txTrytes), true)
 		if err != nil {
 			return nil, err
 		}

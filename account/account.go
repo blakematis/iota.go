@@ -202,12 +202,12 @@ func (acc *account) UpdateSettings(setts *Settings) error {
 func (acc *account) Start() error {
 	acc.mu.Lock()
 	defer acc.mu.Unlock()
-	// load the latest used key index
-	lastUsedKeyIndex, err := acc.setts.store.ReadIndex(acc.id)
+	// ensure account is known to the store
+	state, err := acc.setts.store.LoadAccount(acc.id)
 	if err != nil {
 		return errors.Wrap(err, "unable to read latest used key index in startup")
 	}
-	acc.lastKeyIndex = lastUsedKeyIndex
+	acc.lastKeyIndex = state.KeyIndex
 
 	// start up plugins
 	if err := acc.startPlugins(); err != nil {
@@ -533,14 +533,15 @@ func defaultInputSelection(acc *account, transferValue uint64, balanceCheck bool
 		sum += balances.Balances[i]
 
 		// add the address as an input
-		if balances.Balances[i] > 0 {
-			addAsInput(&api.Input{
-				Address:  primaryAddrs[i],
-				KeyIndex: s.keyIndex,
-				Balance:  balances.Balances[i],
-				Security: s.req.SecurityLevel,
-			})
+		if balances.Balances[i] <= 0 {
+			continue
 		}
+		addAsInput(&api.Input{
+			Address:  primaryAddrs[i],
+			KeyIndex: s.keyIndex,
+			Balance:  balances.Balances[i],
+			Security: s.req.SecurityLevel,
+		})
 
 		// mark the address for removal as it should be freed from the store
 		markForRemoval(s.keyIndex)

@@ -184,6 +184,10 @@ func (p *Promoter) promote() {
 		if err != nil {
 			return "", err
 		}
+		// reverse order of the trytes as PoW needs them from high to low index
+		for left, right := 0, len(essenceTrytes)-1; left < right; left, right = left+1, right-1 {
+			essenceTrytes[left], essenceTrytes[right] = essenceTrytes[right], essenceTrytes[left]
+		}
 		return send(essenceTrytes, tips)
 	}
 

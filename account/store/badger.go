@@ -22,6 +22,7 @@ type BadgerStore struct {
 
 func (b *BadgerStore) init() error {
 	opts := badger.DefaultOptions
+	opts.SyncWrites = true
 	opts.Dir = b.dir
 	opts.ValueDir = b.dir
 	var err error
