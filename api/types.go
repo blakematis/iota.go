@@ -19,7 +19,7 @@ type FindTransactionsQuery struct {
 	Tags      []Trytes `json:"tags,omitempty"`
 }
 
-// UsableBalance represents a non negative balance.
+// AvailableBalance represents a non negative balance.
 type Balance = uint64
 
 // Input is an address from which to withdraw the total available balance

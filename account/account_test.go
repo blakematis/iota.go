@@ -112,7 +112,7 @@ var _ = Describe("account", func() {
 			It("should return the correct address", func() {
 				for _, compareAddr := range addrs {
 					t := time.Now().AddDate(0, 0, 1)
-					depositAddr, err := acc.AllocateDepositRequest(&deposit.Request{TimeoutOn: &t})
+					depositAddr, err := acc.AllocateDepositRequest(&deposit.Request{TimeoutAt: &t})
 					Expect(err).ToNot(HaveOccurred())
 					Expect(depositAddr.Address).To(Equal(compareAddr))
 				}
@@ -121,7 +121,7 @@ var _ = Describe("account", func() {
 	})
 
 	Context("Operations", func() {
-		FContext("UsableBalance()", func() {
+		FContext("AvailableBalance()", func() {
 			BeforeEach(newAccount)
 
 			FIt("returns the correct usable balance", func() {
@@ -172,17 +172,17 @@ var _ = Describe("account", func() {
 
 				t := time.Now().AddDate(0, 0, 1)
 				for i := 0; i < 3; i++ {
-					conds, err := acc.AllocateDepositRequest(&deposit.Request{TimeoutOn: &t})
+					conds, err := acc.AllocateDepositRequest(&deposit.Request{TimeoutAt: &t})
 					Expect(err).ToNot(HaveOccurred())
 					Expect(conds.Address).To(Equal(addrs[i]))
 				}
-				balance, err := acc.UsableBalance()
+				balance, err := acc.AvailableBalance()
 				Expect(err).ToNot(HaveOccurred())
 				Expect(balance).To(Equal(uint64(60)))
 			})
 
-			It("returns the 0 usableBalance on a new account", func() {
-				balance, err := acc.UsableBalance()
+			It("returns the 0 availableBalance on a new account", func() {
+				balance, err := acc.AvailableBalance()
 				Expect(err).ToNot(HaveOccurred())
 				Expect(balance).To(Equal(uint64(0)))
 			})
@@ -212,7 +212,7 @@ var _ = Describe("account", func() {
 				trunkTx := strings.Repeat("A", 81)
 				branchTx := strings.Repeat("B", 81)
 
-				// usableBalance query
+				// availableBalance query
 				defer gock.Flush()
 				gock.New(DefaultLocalIRIURI).
 					Persist().
@@ -307,11 +307,11 @@ var _ = Describe("account", func() {
 				// hypothetical deposit address given to someone and got some funds
 				t := time.Now().AddDate(0, 0, 1)
 				expectedAmount := uint64(100)
-				_, err = acc.AllocateDepositRequest(&deposit.Request{TimeoutOn: &t, ExpectedAmount: &expectedAmount})
+				_, err = acc.AllocateDepositRequest(&deposit.Request{TimeoutAt: &t, ExpectedAmount: &expectedAmount})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("having the correct current usable balance")
-				balance, err := acc.UsableBalance()
+				balance, err := acc.AvailableBalance()
 				Expect(err).ToNot(HaveOccurred())
 				Expect(balance).To(Equal(uint64(100)))
 

@@ -23,7 +23,7 @@ const (
 )
 
 func (dc *Conditions) URL() string {
-	return fmt.Sprintf("iota://%s/?t=%d&m=%v&am=%d", dc.Address, dc.TimeoutOn.Unix(), dc.MultiUse, dc.ExpectedAmount)
+	return fmt.Sprintf("iota://%s/?t=%d&m=%v&am=%d", dc.Address, dc.TimeoutAt.Unix(), dc.MultiUse, dc.ExpectedAmount)
 }
 
 func ParseMagnetLink(s string) (*Conditions, error) {
@@ -40,7 +40,7 @@ func ParseMagnetLink(s string) (*Conditions, error) {
 		return nil, errors.Wrap(err, "invalid expire timestamp")
 	}
 	expire := time.Unix(expiresSeconds, 0)
-	cond.TimeoutOn = &expire
+	cond.TimeoutAt = &expire
 	cond.MultiUse = query.Get(ConditionMultiUse) == "true"
 	expectedAmount, err := strconv.ParseInt(query.Get(ConditionAmount), 10, 64)
 	if err != nil {
@@ -54,7 +54,7 @@ func ParseMagnetLink(s string) (*Conditions, error) {
 // Request defines a new deposit request against the account.
 type Request struct {
 	// The time after this deposit address becomes invalid.
-	TimeoutOn *time.Time `json:"timeout_on,omitempty"`
+	TimeoutAt *time.Time `json:"timeout_on,omitempty"`
 	// Whether to expect multiple deposits to this address
 	// in the given timeout.
 	// If this flag is false, the deposit address is considered

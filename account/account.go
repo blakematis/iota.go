@@ -31,14 +31,14 @@ type Account interface {
 	Send(recipients ...Recipient) (bundle.Bundle, error)
 	// AllocateDepositRequest generates a new deposit request.
 	AllocateDepositRequest(req *deposit.Request) (*deposit.Conditions, error)
-	// UsableBalance gets the current usable balance.
+	// AvailableBalance gets the current available balance.
 	// The balance is computed from all current deposit addresses which are ready
 	// for input selection. To get the current total balance, use TotalBalance().
-	UsableBalance() (uint64, error)
+	AvailableBalance() (uint64, error)
 	// TotalBalance gets the current total balance.
 	// The total balance is computed from all currently allocated deposit addresses.
-	// It does not represent the actual usable balance for doing transfers.
-	// Use UsableBalance() to get the current usable balance.
+	// It does not represent the actual available balance for doing transfers.
+	// Use AvailableBalance() to get the current available balance.
 	TotalBalance() (uint64, error)
 	// IsNew checks whether the account is new.
 	IsNew() (bool, error)
@@ -129,7 +129,7 @@ func (acc *account) AllocateDepositRequest(req *deposit.Request) (*deposit.Condi
 		return nil, ErrAccountNotRunning
 	}
 
-	if req.TimeoutOn == nil {
+	if req.TimeoutAt == nil {
 		return nil, ErrTimeoutNotSpecified
 	}
 
@@ -138,20 +138,20 @@ func (acc *account) AllocateDepositRequest(req *deposit.Request) (*deposit.Condi
 		return nil, err
 	}
 
-	if req.TimeoutOn.Add(-(time.Duration(5) * time.Minute)).Before(currentTime) {
+	if req.TimeoutAt.Add(-(time.Duration(5) * time.Minute)).Before(currentTime) {
 		return nil, ErrTimeoutTooLow
 	}
 
 	return acc.allocateDepositRequest(req)
 }
 
-func (acc *account) UsableBalance() (uint64, error) {
+func (acc *account) AvailableBalance() (uint64, error) {
 	acc.mu.RLock()
 	defer acc.mu.RUnlock()
 	if !acc.running {
 		return 0, ErrAccountNotRunning
 	}
-	return acc.usableBalance()
+	return acc.availableBalance()
 }
 
 func (acc *account) TotalBalance() (uint64, error) {
@@ -360,7 +360,7 @@ func (acc *account) send(targets Recipients) (bundle.Bundle, error) {
 	return bndl, nil
 }
 
-func (acc *account) usableBalance() (uint64, error) {
+func (acc *account) availableBalance() (uint64, error) {
 	balance, _, _, err := acc.setts.inputSelectionStrategy(acc, 0, true)
 	return balance, err
 }
@@ -470,7 +470,7 @@ func defaultInputSelection(acc *account, transferValue uint64, balanceCheck bool
 	// iterate over all allocated deposit addresses
 	for keyIndex, req := range depositRequests {
 		// remainder address
-		if req.TimeoutOn == nil {
+		if req.TimeoutAt == nil {
 			if req.ExpectedAmount == nil {
 				panic("remainder address in system without 'expected amount'")
 			}
@@ -481,7 +481,7 @@ func defaultInputSelection(acc *account, transferValue uint64, balanceCheck bool
 		}
 
 		// timed out
-		if now.After(*req.TimeoutOn) {
+		if now.After(*req.TimeoutAt) {
 			addr, _ := address.GenerateAddress(seed, keyIndex, req.SecurityLevel, false)
 			secondaryAddrs = append(secondaryAddrs, addr)
 			secondarySelection = append(secondarySelection, selection{keyIndex, req})
