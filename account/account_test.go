@@ -319,7 +319,7 @@ var _ = Describe("account", func() {
 				eventListener := listener.NewEventListener(em).Sends()
 				resultBackCheck := make(chan bundle.Bundle)
 
-				poll.ManuelPoll()
+				poll.ManualPoll()
 
 				go func() {
 					bndl := <-eventListener.Sending
@@ -358,7 +358,7 @@ var _ = Describe("account", func() {
 				eventListener.ConfirmedSends()
 
 				go func() {
-					poll.ManuelPoll()
+					poll.ManualPoll()
 				}()
 
 				bundleFromEvent = <-eventListener.Sent

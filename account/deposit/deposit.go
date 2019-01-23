@@ -54,7 +54,7 @@ func ParseMagnetLink(s string) (*Conditions, error) {
 // Request defines a new deposit request against the account.
 type Request struct {
 	// The time after this deposit address becomes invalid.
-	TimeoutAt *time.Time `json:"timeout_on,omitempty"`
+	TimeoutAt *time.Time `json:"timeout_at,omitempty"`
 	// Whether to expect multiple deposits to this address
 	// in the given timeout.
 	// If this flag is false, the deposit address is considered

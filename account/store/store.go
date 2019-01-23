@@ -57,16 +57,30 @@ var (
 
 // Store defines a persistence layer which takes care of storing account data.
 type Store interface {
+	// LoadAccount loads an existing or allocates a new account state from/in the database and returns the state.
 	LoadAccount(id string) (*AccountState, error)
+	// RemoveAccount removes the account with the given id from the store.
 	RemoveAccount(id string) error
+	// Returns the last used key index for the given account.
 	ReadIndex(id string) (uint64, error)
+	// WriteIndex stores the given index as the last used key index for the given account.
 	WriteIndex(id string, index uint64) error
+	// AddDepositRequest stores the deposit request under the given account with the used key index.
 	AddDepositRequest(id string, index uint64, depositRequest *StoredDepositRequest) error
+	// RemoveDepositRequest removes the deposit request with the given key index under the given account.
 	RemoveDepositRequest(id string, index uint64) error
+	// GetDepositRequests loads the stored deposit requests of the given account.
 	GetDepositRequests(id string) (map[uint64]*StoredDepositRequest, error)
-	AddPendingTransfer(id string, tailTx Hash, bundleTrytes []Trytes, indices ...uint64) error
-	RemovePendingTransfer(id string, tailHash Hash) error
-	AddTailHash(id string, tailHash Hash, newTailTxHash Hash) error
+	// AddPendingTransfer stores the pending transfer under the given account with the origin tail tx hash as a key and
+	// removes all deposit requests which correspond to the used key indices for the transfer.
+	AddPendingTransfer(id string, originTailTxHash Hash, bundleTrytes []Trytes, indices ...uint64) error
+	// RemovePendingTransfer removes the pending transfer with the given origin tail transaction hash
+	// from the given account.
+	RemovePendingTransfer(id string, originTailTxHash Hash) error
+	// AddTailHash adds the given new tail transaction hash (presumably from a reattachment) under the given pending transfer
+	// indexed by the given origin tail transaction hash.
+	AddTailHash(id string, originTailTxHash Hash, newTailTxHash Hash) error
+	// GetPendingTransfers returns all pending transfers of the given account.
 	GetPendingTransfers(id string) (map[string]*PendingTransfer, error)
 }
 

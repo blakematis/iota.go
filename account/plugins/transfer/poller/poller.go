@@ -85,9 +85,9 @@ func (tp *TransferPoller) Start(acc account.Account) error {
 	return nil
 }
 
-// ManuelPoll awaits the current transfer polling task to finish (in case it's ongoing),
+// ManualPoll awaits the current transfer polling task to finish (in case it's ongoing),
 // pauses the task, does a manual transfer polling, resumes the transfer poll task and then returns.
-func (tp *TransferPoller) ManuelPoll() error {
+func (tp *TransferPoller) ManualPoll() error {
 	if tp.acc == nil {
 		return nil
 	}
@@ -118,13 +118,13 @@ func (tp *TransferPoller) Shutdown() error {
 func (tp *TransferPoller) pollTransfers() {
 	pendingTransfers, err := tp.store.GetPendingTransfers(tp.acc.ID())
 	if err != nil {
-		tp.em.Emit(errors.Wrap(err, "unable to load account state for polling transfers"), event.EventError)
+		tp.em.Emit(errors.Wrap(err, "unable to load pending transfers for polling transfers"), event.EventError)
 		return
 	}
 
 	depositRequests, err := tp.store.GetDepositRequests(tp.acc.ID())
 	if err != nil {
-		tp.em.Emit(errors.Wrap(err, "unable to load account state for polling transfers"), event.EventError)
+		tp.em.Emit(errors.Wrap(err, "unable to load deposit requests for polling transfers"), event.EventError)
 		return
 	}
 

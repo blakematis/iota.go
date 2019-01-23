@@ -89,9 +89,9 @@ func (p *Promoter) Start(acc account.Account) error {
 	return nil
 }
 
-// ManuelPoll awaits the current promotion/reattachment task to finish (in case it's ongoing),
+// ManualPoll awaits the current promotion/reattachment task to finish (in case it's ongoing),
 // pauses the task, does a manual promotion/reattachment task, resumes the repeated task and then returns.
-func (p *Promoter) ManuelPoll() error {
+func (p *Promoter) ManualPoll() error {
 	p.pause()
 	defer p.resume()
 	p.promote()
